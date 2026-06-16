@@ -1,0 +1,237 @@
+{
+  "mcpServers": {
+    "mcp_TeamsServer": {
+      "type": "http",
+      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/{tenantId}/servers/mcp_TeamsServer",
+      "msal": {
+        "tenantId": "{tenantId}",
+        "clientId": "{clientId}",
+        "scopes": ["https://agent365.svc.cloud.microsoft/.default"],
+        "callbackPort": 8080
+      },
+      "middleware": [
+        {
+          "type": "MetaPrefixTranslationMiddleware",
+          "prefixMap": {
+            "ifc.policy": "com.github.ifc/policy",
+            "ifc": "com.github.ifc/labels"
+          }
+        },
+        {
+          "type": "LabelConversionMiddleware"
+        },
+        {
+          "type": "StripFastmcpMetaMiddleware"
+        },
+        {
+          "type": "WorkIQLabellingMiddleware"
+        },
+        {
+          "type": "PolicyMiddleware",
+          "policies": {
+            "*": { "file": "policies/deny.rego" },
+            "ListTeams": { "file": "policies/allow.rego" },
+            "ListChannels": { "file": "policies/allow.rego" },
+            "ListChats": { "file": "policies/allow.rego" },
+            "ListChannelMembers": { "file": "policies/allow.rego" },
+            "ListChatMembers": { "file": "policies/allow.rego" },
+            "ListChatMessages": { "file": "policies/allow.rego" },
+            "ListChannelMessages": { "file": "policies/allow.rego" },
+            "SendMessageToChannel": { "file": "policies/mcp_TeamsServer/send_message_to_channel.rego" }
+          }
+        },
+        {
+          "type": "ToolAnnotationsMiddleware",
+          "toolAnnotations": {
+            "*": {
+              "readOnlyHint": false,
+              "openWorldHint": true,
+              "destructiveHint": true,
+              "idempotentHint": false
+            },
+            "ListTeams": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "idempotentHint": true
+            },
+            "ListChannelMembers": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "idempotentHint": true
+            },
+            "ListChatMembers": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "idempotentHint": true
+            },
+            "ListChatMessages": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "idempotentHint": true
+            },
+            "ListChannelMessages": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "idempotentHint": true
+            }
+          }
+        },
+        {
+          "type": "OutputSchemaMiddleware",
+          "outputSchemas": {
+            "ListTeams": {
+              "type": "object",
+              "properties": {
+                "teams": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "displayName": {"type": "string"},
+                        "description": {"type": "string"},
+                        "webUrl": {"type": ["string", "null"]}
+                    },
+                    "required": ["id", "displayName", "description", "webUrl"],
+                    "additionalProperties": false
+                  }
+                }
+              }
+            },           
+            "ListChannelMembers": {
+              "type": "object",
+              "properties": {
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":          { "type": "string" },
+                      "displayName": { "type": "string" },
+                      "email":       { "type": "string" },
+                      "userId":      { "type": "string", "format": "uuid" },
+                      "roles": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["Owner", "Member", "Guest"] }
+                      }
+                    },
+                    "required": ["id", "displayName", "email", "userId", "roles"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["members"],
+              "additionalProperties": false
+            },
+            "ListChatMembers": {
+              "type": "object",
+              "properties": {
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":          { "type": "string" },
+                      "displayName": { "type": "string" },
+                      "email":       { "type": "string" },
+                      "userId":      { "type": "string", "format": "uuid" },
+                      "roles": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["Owner", "Member", "Guest"] }
+                      }
+                    },
+                    "required": ["id", "displayName", "email", "userId", "roles"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["members"],
+              "additionalProperties": false
+            },         
+            "ListChatMessages": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":                   { "type": "string" },
+                      "createdDateTime":      { "type": "string", "format": "date-time" },
+                      "lastModifiedDateTime": { "type": "string", "format": "date-time" },
+                      "from": {
+                        "type": ["object", "null"],
+                        "properties": {
+                          "displayName": { "type": [ "string", "null" ] },
+                          "id":          { "type": ["string", "null"], "format": "uuid" }
+                        },
+                        "required": ["displayName", "id"],
+                        "additionalProperties": false
+                      },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "contentType": { "type": "string", "enum": ["Text", "Html"] },
+                          "content":     { "type": "string" }
+                        },
+                        "required": ["contentType", "content"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": ["id", "createdDateTime", "lastModifiedDateTime", "from", "body"],
+                    "additionalProperties": false
+                  }
+                },
+                "hasMoreResults": { "type": "boolean" },
+                "nextLink":       { "type": "string", "format": "uri" }
+              },
+              "required": ["messages", "hasMoreResults"],
+              "additionalProperties": false
+            },
+            "ListChannelMessages": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":                   { "type": "string" },
+                      "createdDateTime":      { "type": "string", "format": "date-time" },
+                      "lastModifiedDateTime": { "type": "string", "format": "date-time" },
+                      "from": {
+                        "type": ["object", "null"],
+                        "properties": {
+                          "displayName": { "type": [ "string", "null" ] },
+                          "id":          { "type": ["string", "null"], "format": "uuid" }
+                        },
+                        "required": ["displayName", "id"],
+                        "additionalProperties": false
+                      },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "contentType": { "type": "string", "enum": ["Text", "Html"] },
+                          "content":     { "type": "string" }
+                        },
+                        "required": ["contentType", "content"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": ["id", "createdDateTime", "from", "body"],
+                    "additionalProperties": false
+                  }
+                },
+                "hasMoreResults": { "type": "boolean" },
+                "nextLink":       { "type": "string", "format": "uri" }
+              },
+              "required": ["messages", "hasMoreResults"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  }  
+}
+

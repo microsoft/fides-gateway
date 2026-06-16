@@ -1,0 +1,28 @@
+{
+    "users": {
+        "35fcac13-d7f6-9bd6-15f9-616a927d9f35": {
+            "email": "example.user@contoso.com",
+            "github": "exampleUser"
+        },
+        "305fb346-3540-4821-9c80-5beb2174a9ec": {
+            "email": "user.s@contoso.com",
+            "github": "user-s"
+        },
+        "fb37f112-3ee1-4d08-bd81-2c0bfc172dba": {
+            "email": "user.r@contoso.com",
+            "github": "user-r"
+        },
+        "e06eed3f-535d-4fd3-92ff-79d2c440fca1": {
+            "email": "user.b1@contoso.com",
+            "github": "user-b"
+        },
+        "18e90e20-daeb-49f7-a513-de5679b01aa2": {
+            "email": "user.b2@contoso.com",
+            "github": "user-b"
+        },
+        "06bce438-c46a-4fcb-9dee-ebcf654535fa": {
+            "email": "user.b3@contoso.com",
+            "github": "user-b"
+        }
+    }
+}
