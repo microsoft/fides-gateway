@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from pathlib import Path
+import sys
 
 import httpx
 import pytest
@@ -16,8 +19,13 @@ from starlette.routing import Mount
 import msal_auth
 from fastmcp_proxy import MCPGateway, load_config
 from mcp_result import extract_structured_content
-from middleware import MetaPrefixTranslationMiddleware, StripFastmcpMetaMiddleware
+from middleware import (
+    MetaPrefixTranslationMiddleware,
+    PolicyMiddleware,
+    StripFastmcpMetaMiddleware,
+)
 from output_schema import OutputSchemaMiddleware
+from github_labeller import GitHubLabellingMiddleware
 from workiq_labeller import WorkIQLabellingMiddleware
 from msal_auth import MSALBearerAuth, load_msal_cache, save_msal_cache
 
@@ -538,12 +546,62 @@ def test_load_config_requires_mcp_servers_key(tmp_path: Path):
         load_config(_write_config(tmp_path, {}))
 
 
+def test_load_config_accepts_stdio_server(tmp_path: Path):
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            {
+                "mcpServers": {
+                    "workiq": {
+                        "type": "stdio",
+                        "command": "/opt/workiq-mock",
+                        "args": ["serve", "--port", "8123"],
+                        "env": {"WORKIQ_MOCK_DISCOVERY_SOURCE": "local"},
+                        "cwd": "/opt",
+                    }
+                }
+            },
+        )
+    )
+    assert cfg["workiq"] == {
+        "type": "stdio",
+        "command": "/opt/workiq-mock",
+        "args": ["serve", "--port", "8123"],
+        "env": {"WORKIQ_MOCK_DISCOVERY_SOURCE": "local"},
+        "cwd": "/opt",
+    }
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"command": ""}, "command"),
+        ({"args": [1]}, "args"),
+        ({"env": {"A": 1}}, "env"),
+        ({"cwd": 1}, "cwd"),
+        ({"url": "http://127.0.0.1"}, "does not support"),
+    ],
+)
+def test_load_config_rejects_invalid_stdio_server(
+    tmp_path: Path, update: dict[str, Any], message: str
+):
+    server = {"type": "stdio", "command": "workiq-mock"}
+    server.update(update)
+    with pytest.raises(ValueError, match=message):
+        load_config(
+            _write_config(
+                tmp_path,
+                {"mcpServers": {"workiq": server}},
+            )
+        )
+
+
 def test_load_config_rejects_unsupported_type(tmp_path: Path):
     with pytest.raises(ValueError, match="Unsupported server type"):
         load_config(
             _write_config(
                 tmp_path,
-                {"mcpServers": {"stdio_server": {"type": "stdio", "url": "ignored"}}},
+                {"mcpServers": {"socket_server": {"type": "socket"}}},
             )
         )
 
@@ -1040,6 +1098,23 @@ async def test_meta_prefix_translation_rewrites_tool_listing_outbound():
 
 
 @pytest.mark.anyio
+async def test_policy_middleware_does_not_advertise_policies():
+    backend = FastMCP("test-backend")
+
+    @backend.tool
+    def hello() -> str:
+        return "hi"
+
+    backend.add_middleware(
+        PolicyMiddleware(policies={"*": {"literal": "package policy"}})
+    )
+    async with Client(FastMCPTransport(backend)) as client:
+        tools = await client.list_tools()
+
+    assert "com.github.ifc/policy" not in (tools[0].meta or {})
+
+
+@pytest.mark.anyio
 async def test_meta_prefix_translation_rewrites_call_meta_inbound():
     """Tool calls whose ``_meta`` keys carry a client_prefix are rewritten
     to the corresponding proxy_prefix before the call is forwarded to
@@ -1197,6 +1272,80 @@ def test_mcp_gateway_config_loads_workiq_labelling_middleware(
 
     attached = gw._proxies["workiq"].middleware
     assert any(isinstance(m, WorkIQLabellingMiddleware) for m in attached)
+
+
+@pytest.mark.anyio
+async def test_stdio_proxy_lists_calls_and_stops_child(tmp_path: Path):
+    pid_path = tmp_path / "stdio.pid"
+    cfg_path = _write_config(
+        tmp_path,
+        _gateway_config(
+            {
+                "fixture": {
+                    "type": "stdio",
+                    "command": sys.executable,
+                    "args": [
+                        str(Path(__file__).parent / "fixtures" / "stdio_server.py")
+                    ],
+                    "env": {
+                        "FIDES_STDIO_PID_PATH": str(pid_path),
+                        "FIDES_STDIO_MARKER": "configured",
+                    },
+                    "cwd": str(tmp_path),
+                }
+            }
+        ),
+    )
+    gateway = MCPGateway(
+        config_path=cfg_path,
+        token_cache_path=tmp_path / "cache.json",
+    )
+    app = gateway.asgi_app()
+
+    async with app.router.lifespan_context(app):
+        async with Client(FastMCPTransport(gateway._proxies["fixture"])) as client:
+            tools = await client.list_tools()
+            assert {tool.name for tool in tools} == {
+                "eval_policy",
+                "inspect_runtime",
+            }
+            result = await client.call_tool("inspect_runtime", {"value": "hello"})
+            payload = extract_structured_content(result)
+            assert payload == {
+                "cwd": str(tmp_path),
+                "marker": "configured",
+                "value": "hello",
+            }
+            pid = int(pid_path.read_text())
+            os.kill(pid, 0)
+
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail(f"stdio child process {pid} was not stopped")
+
+
+def test_mcp_gateway_config_loads_github_labelling_middleware(tmp_path: Path):
+    cfg_path = _write_config(
+        tmp_path,
+        _gateway_config(
+            {
+                "github": {
+                    "type": "http",
+                    "url": "https://github/mcp",
+                    "middleware": [{"type": "GitHubLabellingMiddleware"}],
+                }
+            }
+        ),
+    )
+    gw = MCPGateway(config_path=cfg_path, token_cache_path=tmp_path / "cache.json")
+
+    attached = gw._proxies["github"].middleware
+    assert any(isinstance(m, GitHubLabellingMiddleware) for m in attached)
 
 
 # ---------------------------------------------------------------------------
@@ -1955,7 +2104,8 @@ decision := {"allow": allow}
     proxy = FastMCP("proxy")
     MCPGateway._register_eval_policy(
         proxy,
-        policy_provider=lambda name: configured.get(name) or configured.get("*"),
+        policy_provider=lambda name, arguments: configured.get(name)
+        or configured.get("*"),
     )
 
     call_args = {
@@ -1999,7 +2149,8 @@ decision := {"allow": allow}
     proxy = FastMCP("proxy")
     MCPGateway._register_eval_policy(
         proxy,
-        policy_provider=lambda name: configured.get(name) or configured.get("*"),
+        policy_provider=lambda name, arguments: configured.get(name)
+        or configured.get("*"),
     )
 
     call_args = {
@@ -2038,7 +2189,7 @@ decision := {"allow": allow}
     proxy = FastMCP("proxy")
     MCPGateway._register_eval_policy(
         proxy,
-        policy_provider=lambda name: configured_policy,
+        policy_provider=lambda name, arguments: configured_policy,
     )
 
     call_args = {
@@ -2097,7 +2248,9 @@ async def test_eval_policy_errors_when_provider_returns_none():
     ``"*"`` fallback) is treated the same as having no provider — the
     call surfaces an MCP tool error."""
     proxy = FastMCP("proxy")
-    MCPGateway._register_eval_policy(proxy, policy_provider=lambda name: None)
+    MCPGateway._register_eval_policy(
+        proxy, policy_provider=lambda name, arguments: None
+    )
 
     call_args = {
         "call": {
@@ -2379,3 +2532,68 @@ decision := {"available": available, "name": name}
         assert after_recapture.structured_content is not None
         assert after_recapture.structured_content["available"] is True
         assert after_recapture.structured_content["name"] == "workiq-replaced"
+
+
+@pytest.mark.anyio
+async def test_eval_policy_selects_policy_by_path_argument():
+    """A tool configured with path rules resolves a different policy per
+    call, from the resource path the call names.
+
+    This is what lets one generic tool (``create_entity``) carry several
+    policies: without it, every creation would share whichever single
+    policy the tool name is bound to.
+    """
+    from middleware import resolve_policies, select_by_path
+
+    def _policy(verdict: str) -> str:
+        return f"""
+package policy
+
+decision := {{"decision": "{verdict}"}}
+"""
+
+    configured = resolve_policies(
+        {
+            "*": {"literal": _policy("deny")},
+            "create_entity": {
+                "pathArg": "parentUrl",
+                "rules": [
+                    {"path": "/chats/*/messages", "literal": _policy("teams")},
+                    {"path": "/me/events", "literal": _policy("calendar")},
+                ],
+            },
+        }
+    )
+
+    def _policy_for(name, arguments):
+        spec = configured.get(name)
+        policy = select_by_path(spec, arguments) if spec is not None else None
+        if policy is not None:
+            return policy
+        default = configured.get("*")
+        return select_by_path(default, arguments) if default is not None else None
+
+    proxy = FastMCP("proxy")
+    MCPGateway._register_eval_policy(proxy, policy_provider=_policy_for)
+
+    async def _decide(parent_url: str) -> str:
+        call_args = {
+            "call": {
+                "name": "create_entity",
+                "arguments": {"parentUrl": parent_url},
+                "_meta": {
+                    IFC_LABELS_META_PREFIX: {
+                        "$": {"integrity": "trusted", "confidentiality": []},
+                    }
+                },
+            },
+        }
+        async with Client(FastMCPTransport(proxy)) as client:
+            result = await client.call_tool("eval_policy", call_args)
+        assert result.structured_content is not None
+        return result.structured_content["decision"]
+
+    assert await _decide("/chats/c1/messages") == "teams"
+    assert await _decide("/me/events") == "calendar"
+    # An unrouted path keeps the server's deny default.
+    assert await _decide("/me/drive/root/children") == "deny"

@@ -22,8 +22,8 @@ _reverse_table: dict[str, list[str]] | None = None
 def _load_tables() -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
     """Load (and cache) the forward and reverse user-mapping tables.
 
-    The forward table maps Microsoft user IDs to their entry in
-    ``user_mapping.json`` (which must include a ``github`` field). The
+    The forward table maps Microsoft user IDs and email aliases to their
+    entry in ``user_mapping.json`` (which must include a ``github`` field). The
     reverse table maps each GitHub handle to the (one or more) Microsoft
     user IDs that share it.
     """
@@ -35,13 +35,23 @@ def _load_tables() -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
 
         if "users" not in mapping:
             raise ValueError("user_mapping.json is missing 'users' key")
-        _user_table = mapping["users"]
+        users = mapping["users"]
+        _user_table = dict(users)
 
         reverse: dict[str, list[str]] = {}
         assert _user_table is not None
-        for user_id, entry in _user_table.items():
+        for user_id, entry in users.items():
             if "github" not in entry:
                 raise ValueError(f"User entry for {user_id!r} missing 'github' field")
+            email = entry.get("email")
+            if isinstance(email, str) and email.strip():
+                email_alias = email.strip().lower()
+                existing = _user_table.get(email_alias)
+                if existing is not None and existing["github"] != entry["github"]:
+                    raise ValueError(
+                        f"Email alias {email_alias!r} maps to multiple GitHub handles"
+                    )
+                _user_table[email_alias] = entry
             reverse.setdefault(entry["github"], []).append(user_id)
         for ids in reverse.values():
             ids.sort()
@@ -51,14 +61,15 @@ def _load_tables() -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
 
 
 def microsoft_to_github(userId: str) -> str:
-    """Look up a Microsoft userId in ``user_mapping.json`` and return the GitHub handle.
+    """Look up a Microsoft user ID or email and return the GitHub handle.
 
     Raises ``KeyError`` if the userId is unknown.
     """
     forward, _ = _load_tables()
-    if userId not in forward:
+    key = userId.lower()
+    if key not in forward:
         raise KeyError(f"userId {userId!r} not found in user_mapping.json")
-    return forward[userId]["github"]
+    return forward[key]["github"]
 
 
 def github_to_microsoft(handle: str) -> list[str]:
