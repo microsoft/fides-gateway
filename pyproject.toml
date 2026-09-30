@@ -4,22 +4,21 @@ version = "0.1.0"
 description = "MCP gateway for propagating information-flow control labels and deterministically enforcing policies in agents"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=3.2.0,<4",
-    "httpx",
+    "fastmcp>=3.2.0",
     "jsonpath-rfc9535>=1.0",
-    "jsonschema",
-    "msal",
-    "mcp",
+    "jsonschema>=4.26.0",
+    "msal>=1.36.0",
+    "mcp>=1.27.0",
     # ``regorus`` powers the gateway's ``eval_policy`` tool. It is not yet
     # published to PyPI (see https://github.com/microsoft/regorus), so it is
     # installed from the upstream git repo. Building it from source requires
     # a Rust toolchain — CI sets one up before ``pip install``.
-    "regorus @ git+https://github.com/microsoft/regorus.git@regorus-v0.10.0#subdirectory=bindings/python",
+    "regorus @ git+https://github.com/microsoft/regorus.git@regorus-v0.10.1#subdirectory=bindings/python",
 ]
 scripts.fides-gateway = "gateway:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "anyio", "black"]
+dev = ["pytest>=9.0.0", "anyio>=4.12.0", "black>=26.5.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -12,8 +12,6 @@ from mcp.types import CallToolRequestParams, TextContent
 
 from mcp_result import extract_structured_content
 
-# TODO: Retrieve and cache path-specific WorkIQ schemas through ``get_schema``.
-
 
 class OutputSchemaMiddleware(Middleware):
     """FastMCP middleware that advertises and enforces per-tool ``outputSchema``.

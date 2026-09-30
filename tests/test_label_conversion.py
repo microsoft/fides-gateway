@@ -17,18 +17,17 @@ from label_conversion import (
 )
 from policy_engine import IFC_LABELS_META_PREFIX
 
-# Three of the IDs in ``user_mapping.json`` all map to ``bkoepf``; these
+# Three of the IDs in ``user_mapping.json`` all map to ``user-b``; these
 # tests exercise the one-to-many reverse mapping using that user.
-BKOEPF_IDS = sorted(
+USER_B_IDS = sorted(
     [
-        "a5ec5c13-1974-4ad6-b549-9169907d9e32",
-        "c7844335-ebd8-4c3a-8dc9-53e198cea9ba",
-        "66a558cd-5c66-41ca-90ae-3fd4b672ff4e",
+        "e06eed3f-535d-4fd3-92ff-79d2c440fca1",
+        "18e90e20-daeb-49f7-a513-de5679b01aa2",
+        "06bce438-c46a-4fcb-9dee-ebcf654535fa",
     ]
 )
-SZANELLA_ID = "9336459d-7269-40d5-8506-cb314cbfab59"
-RISHI_ID = "306c0249-7495-4140-bd5f-f476364a9653"
-JUHEE_ID = "4720a62a-62ef-46cb-9d61-e207358cbe46"
+USER_S_ID = "305fb346-3540-4821-9c80-5beb2174a9ec"
+USER_R_ID = "fb37f112-3ee1-4d08-bd81-2c0bfc172dba"
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +36,7 @@ JUHEE_ID = "4720a62a-62ef-46cb-9d61-e207358cbe46"
 
 
 def test_microsoft_to_github_known_user() -> None:
-    assert microsoft_to_github(SZANELLA_ID) == "s-zanella"
-
-
-def test_microsoft_email_to_github_known_user() -> None:
-    assert microsoft_to_github("santiago@projectroma.onmicrosoft.com") == "s-zanella"
+    assert microsoft_to_github(USER_S_ID) == "user-s"
 
 
 def test_microsoft_to_github_unknown_raises() -> None:
@@ -51,7 +46,7 @@ def test_microsoft_to_github_unknown_raises() -> None:
 
 def test_github_to_microsoft_one_to_many() -> None:
     """A single GitHub handle expands to *all* its Microsoft identities."""
-    assert github_to_microsoft("bkoepf") == BKOEPF_IDS
+    assert github_to_microsoft("user-b") == USER_B_IDS
 
 
 def test_github_to_microsoft_unknown_raises() -> None:
@@ -61,21 +56,14 @@ def test_github_to_microsoft_unknown_raises() -> None:
 
 def test_convert_confidentiality_to_github_dedupes_multi_id_handle() -> None:
     """Multiple Microsoft IDs that share a handle collapse to one entry."""
-    result = _convert_confidentiality(BKOEPF_IDS + [SZANELLA_ID], "to_github")
-    assert result == ["bkoepf", "s-zanella"]
-
-
-def test_convert_confidentiality_dedupes_user_id_and_email_alias() -> None:
-    result = _convert_confidentiality(
-        [JUHEE_ID, "current.user@example.com"], "to_github"
-    )
-    assert result == ["t-juheekim_microsoft"]
+    result = _convert_confidentiality(USER_B_IDS + [USER_S_ID], "to_github")
+    assert result == ["user-b", "user-s"]
 
 
 def test_convert_confidentiality_to_microsoft_expands_handle() -> None:
     """A GitHub handle expands into all corresponding Microsoft IDs."""
-    result = _convert_confidentiality(["bkoepf"], "to_microsoft")
-    assert result == BKOEPF_IDS
+    result = _convert_confidentiality(["user-b"], "to_microsoft")
+    assert result == USER_B_IDS
 
 
 def test_convert_confidentiality_passes_through_public_sentinel() -> None:
@@ -87,15 +75,15 @@ def test_convert_confidentiality_passes_through_public_sentinel() -> None:
 def test_convert_confidentiality_drops_unknown_to_github() -> None:
     """Unknown Microsoft IDs are dropped (fail-closed — shrinks readers)."""
     result = _convert_confidentiality(
-        [SZANELLA_ID, "00000000-0000-0000-0000-000000000000"], "to_github"
+        [USER_S_ID, "00000000-0000-0000-0000-000000000000"], "to_github"
     )
-    assert result == ["s-zanella"]
+    assert result == ["user-s"]
 
 
 def test_convert_confidentiality_drops_unknown_to_microsoft() -> None:
     """Unknown GitHub handles are dropped (fail-closed — shrinks readers)."""
-    result = _convert_confidentiality(["s-zanella", "ghost-handle"], "to_microsoft")
-    assert result == [SZANELLA_ID]
+    result = _convert_confidentiality(["user-s", "ghost-handle"], "to_microsoft")
+    assert result == [USER_S_ID]
 
 
 def test_convert_confidentiality_drops_all_unknown_yields_empty() -> None:
@@ -105,13 +93,13 @@ def test_convert_confidentiality_drops_all_unknown_yields_empty() -> None:
 
 def test_convert_confidentiality_result_is_sorted() -> None:
     """Output is sorted for stability across runs."""
-    result = _convert_confidentiality([RISHI_ID, SZANELLA_ID], "to_github")
+    result = _convert_confidentiality([USER_R_ID, USER_S_ID], "to_github")
     assert result == sorted(result)
 
 
 def test_convert_confidentiality_unknown_direction_raises() -> None:
     with pytest.raises(ValueError, match="direction"):
-        _convert_confidentiality([SZANELLA_ID], "sideways")
+        _convert_confidentiality([USER_S_ID], "sideways")
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +124,11 @@ def test_convert_meta_dict_translates_multiple_paths() -> None:
         IFC_LABELS_META_PREFIX: {
             "$": {
                 "integrity": "trusted",
-                "confidentiality": [SZANELLA_ID, RISHI_ID],
+                "confidentiality": [USER_S_ID, USER_R_ID],
             },
             "$['structuredContent']['x']": {
                 "integrity": "untrusted",
-                "confidentiality": BKOEPF_IDS,
+                "confidentiality": USER_B_IDS,
             },
         }
     }
@@ -149,11 +137,11 @@ def test_convert_meta_dict_translates_multiple_paths() -> None:
     block = converted[IFC_LABELS_META_PREFIX]
     assert block["$"] == {
         "integrity": "trusted",
-        "confidentiality": ["rishi-s8", "s-zanella"],
+        "confidentiality": ["user-r", "user-s"],
     }
     assert block["$['structuredContent']['x']"] == {
         "integrity": "untrusted",
-        "confidentiality": ["bkoepf"],
+        "confidentiality": ["user-b"],
     }
 
 
@@ -162,24 +150,24 @@ def test_convert_meta_dict_preserves_extra_meta_keys() -> None:
     meta = {
         "some.other.prefix": {"k": "v"},
         IFC_LABELS_META_PREFIX: {
-            "$": {"integrity": "trusted", "confidentiality": [SZANELLA_ID]},
+            "$": {"integrity": "trusted", "confidentiality": [USER_S_ID]},
         },
     }
     converted = _convert_meta_dict(meta, "to_github")
     assert converted is not None
     assert converted["some.other.prefix"] == {"k": "v"}
-    assert converted[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["s-zanella"]
+    assert converted[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["user-s"]
 
 
 def test_convert_meta_dict_does_not_mutate_input() -> None:
     """The original dict (and its nested labels block) is left intact."""
     original_block = {
-        "$": {"integrity": "trusted", "confidentiality": [SZANELLA_ID]},
+        "$": {"integrity": "trusted", "confidentiality": [USER_S_ID]},
     }
     meta: dict[str, Any] = {IFC_LABELS_META_PREFIX: original_block}
     converted = _convert_meta_dict(meta, "to_github")
     assert meta[IFC_LABELS_META_PREFIX] is original_block
-    assert original_block["$"]["confidentiality"] == [SZANELLA_ID]
+    assert original_block["$"]["confidentiality"] == [USER_S_ID]
     assert converted is not None
     assert converted is not meta
 
@@ -192,7 +180,7 @@ def test_convert_meta_dict_leaves_malformed_label_entries_alone() -> None:
             "$['x']": {"integrity": "trusted"},  # no confidentiality
             "$['y']": {
                 "integrity": "trusted",
-                "confidentiality": [SZANELLA_ID],
+                "confidentiality": [USER_S_ID],
             },
         }
     }
@@ -201,7 +189,7 @@ def test_convert_meta_dict_leaves_malformed_label_entries_alone() -> None:
     block = converted[IFC_LABELS_META_PREFIX]
     assert block["$"] == "not-a-dict"
     assert block["$['x']"] == {"integrity": "trusted"}
-    assert block["$['y']"]["confidentiality"] == ["s-zanella"]
+    assert block["$['y']"]["confidentiality"] == ["user-s"]
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +228,7 @@ async def test_middleware_translates_result_meta_microsoft_to_github() -> None:
                 IFC_LABELS_META_PREFIX: {
                     "$": {
                         "integrity": "trusted",
-                        "confidentiality": [SZANELLA_ID, RISHI_ID, "public"],
+                        "confidentiality": [USER_S_ID, USER_R_ID, "public"],
                     },
                 }
             },
@@ -251,7 +239,7 @@ async def test_middleware_translates_result_meta_microsoft_to_github() -> None:
     assert result.meta[IFC_LABELS_META_PREFIX] == {
         "$": {
             "integrity": "trusted",
-            "confidentiality": ["public", "rishi-s8", "s-zanella"],
+            "confidentiality": ["public", "user-r", "user-s"],
         },
     }
 
@@ -265,7 +253,7 @@ async def test_middleware_translates_request_meta_github_to_microsoft() -> None:
             IFC_LABELS_META_PREFIX: {
                 "$['arguments']": {
                     "integrity": "trusted",
-                    "confidentiality": ["bkoepf", "s-zanella"],
+                    "confidentiality": ["user-b", "user-s"],
                 },
             }
         }
@@ -285,7 +273,7 @@ async def test_middleware_translates_request_meta_github_to_microsoft() -> None:
     assert captured["meta"][IFC_LABELS_META_PREFIX] == {
         "$['arguments']": {
             "integrity": "trusted",
-            "confidentiality": sorted(BKOEPF_IDS + [SZANELLA_ID]),
+            "confidentiality": sorted(USER_B_IDS + [USER_S_ID]),
         },
     }
 
@@ -299,7 +287,7 @@ async def test_middleware_request_meta_is_request_params_meta_after_rewrite() ->
     context = _make_context(
         {
             IFC_LABELS_META_PREFIX: {
-                "$": {"integrity": "trusted", "confidentiality": ["s-zanella"]},
+                "$": {"integrity": "trusted", "confidentiality": ["user-s"]},
             }
         }
     )
@@ -354,7 +342,7 @@ async def test_middleware_drops_unknown_principals_on_result() -> None:
                     "$": {
                         "integrity": "trusted",
                         "confidentiality": [
-                            SZANELLA_ID,
+                            USER_S_ID,
                             "00000000-0000-0000-0000-000000000000",
                         ],
                     },
@@ -364,7 +352,7 @@ async def test_middleware_drops_unknown_principals_on_result() -> None:
 
     result = await middleware.on_call_tool(context, call_next)
     assert result.meta is not None
-    assert result.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["s-zanella"]
+    assert result.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["user-s"]
 
 
 @pytest.mark.anyio
@@ -378,7 +366,7 @@ async def test_middleware_round_trip_microsoft_to_github_and_back() -> None:
     context = _make_context(
         {
             IFC_LABELS_META_PREFIX: {
-                "$": {"integrity": "trusted", "confidentiality": ["bkoepf"]},
+                "$": {"integrity": "trusted", "confidentiality": ["user-b"]},
             }
         }
     )
@@ -390,10 +378,10 @@ async def test_middleware_round_trip_microsoft_to_github_and_back() -> None:
         return ToolResult.model_construct(content=[], meta=echoed)
 
     result = await middleware.on_call_tool(context, call_next)
-    # Inbound expanded "bkoepf" → all three MS IDs; outbound collapses
+    # Inbound expanded "user-b" → all three MS IDs; outbound collapses
     # them back to the single handle.
     assert result.meta is not None
-    assert result.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["bkoepf"]
+    assert result.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["user-b"]
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +405,7 @@ async def test_middleware_translates_eval_policy_call_arg_meta() -> None:
                     IFC_LABELS_META_PREFIX: {
                         "$['arguments']['to']": {
                             "integrity": "trusted",
-                            "confidentiality": ["bkoepf", "s-zanella"],
+                            "confidentiality": ["user-b", "user-s"],
                         },
                     }
                 },
@@ -436,7 +424,7 @@ async def test_middleware_translates_eval_policy_call_arg_meta() -> None:
     assert captured["call"]["_meta"][IFC_LABELS_META_PREFIX] == {
         "$['arguments']['to']": {
             "integrity": "trusted",
-            "confidentiality": sorted(BKOEPF_IDS + [SZANELLA_ID]),
+            "confidentiality": sorted(USER_B_IDS + [USER_S_ID]),
         },
     }
 
@@ -456,7 +444,7 @@ async def test_middleware_accepts_meta_alias_on_eval_policy_call_arg() -> None:
                     IFC_LABELS_META_PREFIX: {
                         "$": {
                             "integrity": "trusted",
-                            "confidentiality": ["s-zanella"],
+                            "confidentiality": ["user-s"],
                         },
                     }
                 },
@@ -470,7 +458,7 @@ async def test_middleware_accepts_meta_alias_on_eval_policy_call_arg() -> None:
     await middleware.on_call_tool(context, call_next)
     assert context.message.arguments["call"]["meta"][IFC_LABELS_META_PREFIX]["$"][
         "confidentiality"
-    ] == [SZANELLA_ID]
+    ] == [USER_S_ID]
 
 
 @pytest.mark.anyio
@@ -481,7 +469,7 @@ async def test_middleware_does_not_touch_call_arg_for_other_tools() -> None:
     middleware = LabelConversionMiddleware()
     nested_meta = {
         IFC_LABELS_META_PREFIX: {
-            "$": {"integrity": "trusted", "confidentiality": ["s-zanella"]},
+            "$": {"integrity": "trusted", "confidentiality": ["user-s"]},
         }
     }
     context = _make_context(
@@ -503,7 +491,7 @@ async def test_middleware_does_not_touch_call_arg_for_other_tools() -> None:
     # Unchanged: still the literal GitHub handle, not expanded.
     assert context.message.arguments["call"]["_meta"][IFC_LABELS_META_PREFIX]["$"][
         "confidentiality"
-    ] == ["s-zanella"]
+    ] == ["user-s"]
 
 
 @pytest.mark.anyio
@@ -546,7 +534,7 @@ async def test_middleware_eval_policy_call_arg_drops_unknown_handles() -> None:
                     IFC_LABELS_META_PREFIX: {
                         "$": {
                             "integrity": "trusted",
-                            "confidentiality": ["s-zanella", "ghost-handle"],
+                            "confidentiality": ["user-s", "ghost-handle"],
                         },
                     }
                 },
@@ -561,4 +549,4 @@ async def test_middleware_eval_policy_call_arg_drops_unknown_handles() -> None:
     assert context.message.arguments is not None
     assert context.message.arguments["call"]["_meta"][IFC_LABELS_META_PREFIX]["$"][
         "confidentiality"
-    ] == [SZANELLA_ID]
+    ] == [USER_S_ID]

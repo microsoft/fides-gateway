@@ -1,64 +1,28 @@
 {
     "users": {
-        "a5ec5c13-1974-4ad6-b549-9169907d9e32": {
-            "email": "bdmin@projectroma.onmicrosoft.com",
-            "github": "bkoepf"
+        "35fcac13-d7f6-9bd6-15f9-616a927d9f35": {
+            "email": "example.user@contoso.com",
+            "github": "exampleUser"
         },
-        "c7844335-ebd8-4c3a-8dc9-53e198cea9ba": {
-            "email": "boris@projectroma.onmicrosoft.com",
-            "github": "bkoepf"
+        "305fb346-3540-4821-9c80-5beb2174a9ec": {
+            "email": "user.s@contoso.com",
+            "github": "user-s"
         },
-        "cfa80a45-1c1f-4863-88f2-bd3d6eb70ad2": {
-            "email": "amchamay@projectroma.onmicrosoft.com",
-            "github": "achamayou"
+        "fb37f112-3ee1-4d08-bd81-2c0bfc172dba": {
+            "email": "user.r@contoso.com",
+            "github": "user-r"
         },
-        "306c0249-7495-4140-bd5f-f476364a9653": {
-            "email": "rishi@projectroma.onmicrosoft.com",
-            "github": "rishi-s8"
+        "e06eed3f-535d-4fd3-92ff-79d2c440fca1": {
+            "email": "user.b1@contoso.com",
+            "github": "user-b"
         },
-        "21b7c060-4cad-41f5-b367-4e8fb33c331b" : {
-            "email": "joanna@projectroma.onmicrosoft.com",
-            "github": "joannaakl"
+        "18e90e20-daeb-49f7-a513-de5679b01aa2": {
+            "email": "user.b2@contoso.com",
+            "github": "user-b"
         },
-        "9336459d-7269-40d5-8506-cb314cbfab59": {
-            "email": "santiago@projectroma.onmicrosoft.com",
-            "github": "s-zanella"
-        },
-        "1d375da2-f984-4eae-a7e1-8bc0e2f297f6" : {
-            "email": "aashish@projectroma.onmicrosoft.com",
-            "github": "aashishkolluri"
-        },
-        "e0110cac-2412-404e-9635-db9a2a07ed3e": {
-            "email": "shtople@projectroma.onmicrosoft.com",
-            "github": "shrutitople"
-        },
-        "66a558cd-5c66-41ca-90ae-3fd4b672ff4e": {
-            "email": "admin@projectroma.onmicrosoft.com",
-            "github": "bkoepf"
-        },
-        "f7f65ffc-29eb-4177-8fa8-fb7efcdbd9c1": {
-            "email": "gokhan@projectroma.onmicrosoft.com",
-            "github": "gokhanarkan"
-        },
-        "4720a62a-62ef-46cb-9d61-e207358cbe46": {
-            "email": "current.user@example.com",
-            "github": "t-juheekim_microsoft"
-        },
-        "486385b9-6b1b-4a42-91c3-582fc155608c": {
-            "email": "bob.martinez@example.com",
-            "github": "workiq-mock-bob-martinez"
-        },
-        "72015bd1-5de6-4a5b-a46b-30ec9b9b98af": {
-            "email": "elena.volkov@example.com",
-            "github": "workiq-mock-elena-volkov"
-        },
-        "8c40a5f6-1350-46c5-bcac-55d3e05e0ad6": {
-            "email": "alex.morgan@example.com",
-            "github": "workiq-mock-alex-morgan"
-        },
-        "b51e33b0-4167-4f39-a5c7-6e1fd1ce95c3": {
-            "email": "alice.wong@example.com",
-            "github": "workiq-mock-alice-wong"
+        "06bce438-c46a-4fcb-9dee-ebcf654535fa": {
+            "email": "user.b3@contoso.com",
+            "github": "user-b"
         }
     }
 }

@@ -1,11 +1,11 @@
 {
   "mcpServers": {
-    "workiq": {
+    "mcp_TeamsServer": {
       "type": "http",
-      "url": "https://workiq.svc.cloud.microsoft/mcp",
+      "url": "https://agent365.svc.cloud.microsoft/agents/tenants/{tenantId}/servers/mcp_TeamsServer",
       "msal": {
-        "tenantId": "090fc601-8371-4167-8b63-dd3a11028a43",
-        "clientId": "ec3a7b3c-4991-46fe-9be6-3b153c9cc931",
+        "tenantId": "{tenantId}",
+        "clientId": "{clientId}",
         "scopes": ["https://agent365.svc.cloud.microsoft/.default"],
         "callbackPort": 8080
       },
@@ -24,124 +24,20 @@
           "type": "StripFastmcpMetaMiddleware"
         },
         {
-          "type": "WorkIQLabellingMiddleware",
-          "labellers": {
-            "fetch": {
-              "pathArg": "entityUrls",
-              "rules": [
-                {
-                  "path": "/chats/*/members",
-                  "labeller": "teamsMembers"
-                },
-                {
-                  "path": "/me/chats/*/members",
-                  "labeller": "teamsMembers"
-                },
-                {
-                  "path": "/users/*/chats/*/members",
-                  "labeller": "teamsMembers"
-                },
-                {
-                  "path": "/teams/*/channels/*/members",
-                  "labeller": "teamsMembers"
-                },
-                {
-                  "path": "/chats/*/messages/**",
-                  "labeller": "teamsMessages"
-                },
-                {
-                  "path": "/me/chats/*/messages/**",
-                  "labeller": "teamsMessages"
-                },
-                {
-                  "path": "/users/*/chats/*/messages/**",
-                  "labeller": "teamsMessages"
-                },
-                {
-                  "path": "/teams/*/channels/*/messages/**",
-                  "labeller": "teamsMessages"
-                },
-                {
-                  "path": "/me/messages/**",
-                  "labeller": "outlookMail"
-                },
-                {
-                  "path": "/me/mailFolders/*/messages/**",
-                  "labeller": "outlookMail"
-                },
-                {
-                  "path": "/users/*/messages/**",
-                  "labeller": "outlookMail"
-                },
-                {
-                  "path": "/me/events/**",
-                  "labeller": "calendarEvents"
-                },
-                {
-                  "path": "/me/calendar/events/**",
-                  "labeller": "calendarEvents"
-                },
-                {
-                  "path": "/me/calendarView/**",
-                  "labeller": "calendarEvents"
-                },
-                {
-                  "path": "/me/calendars/*/calendarView/**",
-                  "labeller": "calendarEvents"
-                }
-              ]
-            }
-          }
+          "type": "WorkIQLabellingMiddleware"
         },
         {
           "type": "PolicyMiddleware",
           "policies": {
-            "*": {
-              "file": "policies/deny.rego"
-            },
-            "search_paths": {
-              "file": "policies/allow.rego"
-            },
-            "get_schema": {
-              "file": "policies/allow.rego"
-            },
-            "list_agents": {
-              "file": "policies/allow.rego"
-            },
-            "fetch": {
-              "file": "policies/allow.rego"
-            },
-            "fetch_blob": {
-              "file": "policies/allow.rego"
-            },
-            "ask": {
-              "file": "policies/allow.rego"
-            },
-            "create_entity": {
-              "pathArg": "parentUrl",
-              "rules": [
-                {
-                  "path": "/chats/*/messages",
-                  "file": "policies/workiq/teams/messages.rego"
-                },
-                {
-                  "path": "/me/chats/*/messages",
-                  "file": "policies/workiq/teams/messages.rego"
-                },
-                {
-                  "path": "/users/*/chats/*/messages",
-                  "file": "policies/workiq/teams/messages.rego"
-                },
-                {
-                  "path": "/teams/*/channels/*/messages",
-                  "file": "policies/workiq/teams/messages.rego"
-                },
-                {
-                  "path": "/teams/*/channels/*/messages/*/replies",
-                  "file": "policies/workiq/teams/messages.rego"
-                }
-              ]
-            }
+            "*": { "file": "policies/deny.rego" },
+            "ListTeams": { "file": "policies/allow.rego" },
+            "ListChannels": { "file": "policies/allow.rego" },
+            "ListChats": { "file": "policies/allow.rego" },
+            "ListChannelMembers": { "file": "policies/allow.rego" },
+            "ListChatMembers": { "file": "policies/allow.rego" },
+            "ListChatMessages": { "file": "policies/allow.rego" },
+            "ListChannelMessages": { "file": "policies/allow.rego" },
+            "SendMessageToChannel": { "file": "policies/mcp_TeamsServer/send_message_to_channel.rego" }
           }
         },
         {
@@ -153,32 +49,27 @@
               "destructiveHint": true,
               "idempotentHint": false
             },
-            "search_paths": {
+            "ListTeams": {
               "readOnlyHint": true,
               "destructiveHint": false,
               "idempotentHint": true
             },
-            "get_schema": {
+            "ListChannelMembers": {
               "readOnlyHint": true,
               "destructiveHint": false,
               "idempotentHint": true
             },
-            "list_agents": {
+            "ListChatMembers": {
               "readOnlyHint": true,
               "destructiveHint": false,
               "idempotentHint": true
             },
-            "fetch": {
+            "ListChatMessages": {
               "readOnlyHint": true,
               "destructiveHint": false,
               "idempotentHint": true
             },
-            "fetch_blob": {
-              "readOnlyHint": true,
-              "destructiveHint": false,
-              "idempotentHint": true
-            },
-            "ask": {
+            "ListChannelMessages": {
               "readOnlyHint": true,
               "destructiveHint": false,
               "idempotentHint": true
@@ -188,121 +79,159 @@
         {
           "type": "OutputSchemaMiddleware",
           "outputSchemas": {
-            "ask": {
+            "ListTeams": {
               "type": "object",
               "properties": {
-                "answer": {
-                  "type": "string"
-                },
-                "conversationId": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "answer",
-                "conversationId"
-              ]
-            },
-            "search_paths": {
-              "type": "object",
-              "properties": {
-                "paths": {
+                "teams": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "path": {
-                        "type": "string"
-                      },
-                      "operations": {
+                        "id": {"type": "string"},
+                        "displayName": {"type": "string"},
+                        "description": {"type": "string"},
+                        "webUrl": {"type": ["string", "null"]}
+                    },
+                    "required": ["id", "displayName", "description", "webUrl"],
+                    "additionalProperties": false
+                  }
+                }
+              }
+            },           
+            "ListChannelMembers": {
+              "type": "object",
+              "properties": {
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":          { "type": "string" },
+                      "displayName": { "type": "string" },
+                      "email":       { "type": "string" },
+                      "userId":      { "type": "string", "format": "uuid" },
+                      "roles": {
                         "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      "operationDetails": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": {
-                            "operation": {
-                              "type": "string"
-                            },
-                            "uriTemplate": {
-                              "type": "string"
-                            }
-                          },
-                          "required": [
-                            "operation"
-                          ]
-                        }
+                        "items": { "type": "string", "enum": ["Owner", "Member", "Guest"] }
                       }
                     },
-                    "required": [
-                      "path",
-                      "operations",
-                      "operationDetails"
-                    ]
+                    "required": ["id", "displayName", "email", "userId", "roles"],
+                    "additionalProperties": false
                   }
                 }
               },
-              "required": [
-                "paths"
-              ]
+              "required": ["members"],
+              "additionalProperties": false
             },
-            "fetch_blob": {
+            "ListChatMembers": {
               "type": "object",
               "properties": {
-                "statusCode": {
-                  "type": "integer"
-                },
-                "sizeBytes": {
-                  "type": "integer"
-                },
-                "base64Content": {
-                  "type": "string"
-                },
-                "error": {
-                  "type": [
-                    "string",
-                    "object",
-                    "null"
-                  ]
-                },
-                "requestId": {
-                  "type": "string"
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":          { "type": "string" },
+                      "displayName": { "type": "string" },
+                      "email":       { "type": "string" },
+                      "userId":      { "type": "string", "format": "uuid" },
+                      "roles": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["Owner", "Member", "Guest"] }
+                      }
+                    },
+                    "required": ["id", "displayName", "email", "userId", "roles"],
+                    "additionalProperties": false
+                  }
                 }
               },
-              "required": [
-                "statusCode",
-                "sizeBytes",
-                "base64Content"
-              ]
-            },
-            "delete_entity": {
+              "required": ["members"],
+              "additionalProperties": false
+            },         
+            "ListChatMessages": {
               "type": "object",
               "properties": {
-                "statusCode": {
-                  "type": "integer"
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":                   { "type": "string" },
+                      "createdDateTime":      { "type": "string", "format": "date-time" },
+                      "lastModifiedDateTime": { "type": "string", "format": "date-time" },
+                      "from": {
+                        "type": ["object", "null"],
+                        "properties": {
+                          "displayName": { "type": [ "string", "null" ] },
+                          "id":          { "type": ["string", "null"], "format": "uuid" }
+                        },
+                        "required": ["displayName", "id"],
+                        "additionalProperties": false
+                      },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "contentType": { "type": "string", "enum": ["Text", "Html"] },
+                          "content":     { "type": "string" }
+                        },
+                        "required": ["contentType", "content"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": ["id", "createdDateTime", "lastModifiedDateTime", "from", "body"],
+                    "additionalProperties": false
+                  }
                 },
-                "data": {},
-                "error": {
-                  "type": [
-                    "object",
-                    "null"
-                  ]
-                },
-                "requestId": {
-                  "type": "string"
-                }
+                "hasMoreResults": { "type": "boolean" },
+                "nextLink":       { "type": "string", "format": "uri" }
               },
-              "required": [
-                "statusCode"
-              ]
+              "required": ["messages", "hasMoreResults"],
+              "additionalProperties": false
+            },
+            "ListChannelMessages": {
+              "type": "object",
+              "properties": {
+                "messages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":                   { "type": "string" },
+                      "createdDateTime":      { "type": "string", "format": "date-time" },
+                      "lastModifiedDateTime": { "type": "string", "format": "date-time" },
+                      "from": {
+                        "type": ["object", "null"],
+                        "properties": {
+                          "displayName": { "type": [ "string", "null" ] },
+                          "id":          { "type": ["string", "null"], "format": "uuid" }
+                        },
+                        "required": ["displayName", "id"],
+                        "additionalProperties": false
+                      },
+                      "body": {
+                        "type": "object",
+                        "properties": {
+                          "contentType": { "type": "string", "enum": ["Text", "Html"] },
+                          "content":     { "type": "string" }
+                        },
+                        "required": ["contentType", "content"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": ["id", "createdDateTime", "from", "body"],
+                    "additionalProperties": false
+                  }
+                },
+                "hasMoreResults": { "type": "boolean" },
+                "nextLink":       { "type": "string", "format": "uri" }
+              },
+              "required": ["messages", "hasMoreResults"],
+              "additionalProperties": false
             }
           }
         }
       ]
     }
-  }
+  }  
 }
+

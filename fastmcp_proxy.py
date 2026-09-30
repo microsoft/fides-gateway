@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.auth import OAuth
-from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware
@@ -23,7 +22,6 @@ from policy_engine import LabeledToolCallParams
 import policy_engine
 
 from workiq_labeller import WorkIQLabellingMiddleware
-from github_labeller import GitHubLabellingMiddleware
 from label_conversion import LabelConversionMiddleware
 
 from middleware import (
@@ -32,9 +30,7 @@ from middleware import (
     StripFastmcpMetaMiddleware,
     ToolAnnotationsMiddleware,
     PolicyMiddleware,
-    PolicySpec,
     resolve_policies,
-    select_by_path,
 )
 from output_schema import OutputSchemaMiddleware
 
@@ -50,62 +46,17 @@ def load_config(config_path: Path) -> dict[str, Any]:
 
     server_meta: dict[str, Any] = {}
     for server_id, cfg in mcp_config["mcpServers"].items():
-        server_type = cfg.get("type")
-        if server_type not in {"http", "stdio"}:
+        if cfg["type"] != "http":
             raise ValueError(
-                f"Unsupported server type '{server_type}' for server '{server_id}'"
+                f"Unsupported server type '{cfg['type']}' for server '{server_id}'"
             )
 
-        if server_type == "http":
-            if "url" not in cfg:
-                raise ValueError(
-                    f"Server '{server_id}' is missing required 'url' field"
-                )
-            server_meta[server_id] = {"type": server_type, "url": cfg["url"]}
-        else:
-            command = cfg.get("command")
-            if not isinstance(command, str) or not command.strip():
-                raise ValueError(
-                    f"Server '{server_id}' is missing required 'command' field"
-                )
-            args = cfg.get("args", [])
-            if not isinstance(args, list) or not all(
-                isinstance(arg, str) for arg in args
-            ):
-                raise ValueError(
-                    f"Server '{server_id}' 'args' field must be an array of strings"
-                )
-            env = cfg.get("env")
-            if env is not None and (
-                not isinstance(env, dict)
-                or not all(
-                    isinstance(name, str) and isinstance(value, str)
-                    for name, value in env.items()
-                )
-            ):
-                raise ValueError(
-                    f"Server '{server_id}' 'env' field must be an object of strings"
-                )
-            cwd = cfg.get("cwd")
-            if cwd is not None and not isinstance(cwd, str):
-                raise ValueError(f"Server '{server_id}' 'cwd' field must be a string")
-            unsupported = {"url", "headers", "msal", "oauth"} & set(cfg)
-            if unsupported:
-                raise ValueError(
-                    f"Server '{server_id}' stdio configuration does not support "
-                    f"{sorted(unsupported)}"
-                )
-            server_meta[server_id] = {
-                "type": server_type,
-                "command": command,
-                "args": list(args),
-            }
-            if env is not None:
-                server_meta[server_id]["env"] = dict(env)
-            if cwd is not None:
-                server_meta[server_id]["cwd"] = cwd
+        if "url" not in cfg:
+            raise ValueError(f"Server '{server_id}' is missing required 'url' field")
 
-        if server_type == "http" and "headers" in cfg:
+        server_meta[server_id] = {"type": cfg["type"], "url": cfg["url"]}
+
+        if "headers" in cfg:
             if not isinstance(cfg["headers"], dict):
                 raise ValueError(
                     f"Server '{server_id}' 'headers' field must be an object"
@@ -117,13 +68,13 @@ def load_config(config_path: Path) -> dict[str, Any]:
                     )
             server_meta[server_id]["headers"] = dict(cfg["headers"])
 
-        if server_type == "http" and "msal" in cfg and "oauth" in cfg:
+        if "msal" in cfg and "oauth" in cfg:
             raise ValueError(
                 f"Server '{server_id}' has both 'msal' and 'oauth' blocks; "
                 "they are mutually exclusive"
             )
 
-        if server_type == "http" and "msal" in cfg:
+        if "msal" in cfg:
             server_meta[server_id]["msal"] = {
                 "tenant_id": cfg["msal"]["tenantId"],
                 "client_id": cfg["msal"]["clientId"],
@@ -131,7 +82,7 @@ def load_config(config_path: Path) -> dict[str, Any]:
                 "callback_port": cfg["msal"].get("callbackPort", 8080),
             }
 
-        if server_type == "http" and "oauth" in cfg:
+        if "oauth" in cfg:
             server_meta[server_id]["oauth"] = {
                 "client_id": cfg["oauth"].get("clientId"),
                 "client_secret": cfg["oauth"].get("clientSecret"),
@@ -171,7 +122,6 @@ class MCPGateway:
         # ``None`` while uncaptured; remains ``None`` if the upstream
         # capture failed (the extension surfaces ``None`` to the policy).
         self._upstream_server_info: dict[str, dict[str, Any] | None] = {}
-        self._stdio_transports: list[StdioTransport] = []
 
         # Build one FastMCP proxy per upstream
         self._proxies: dict[str, FastMCP] = {
@@ -185,11 +135,11 @@ class MCPGateway:
     @staticmethod
     def _register_eval_policy(
         mcp: FastMCP,
-        upstream_client_factory: Callable[[], Client] | None = None,
-        server_info_provider: Callable[[], dict[str, Any] | None] | None = None,
-        policy_provider: (
-            Callable[[str, Mapping[str, Any] | None], str | None] | None
+        upstream_client_factory: (
+            Callable[[], Client[StreamableHttpTransport]] | None
         ) = None,
+        server_info_provider: Callable[[], dict[str, Any] | None] | None = None,
+        policy_provider: Callable[[str], str | None] | None = None,
     ) -> None:
         """Register the gateway-implemented policy-evaluation tool,
         backed by :func:`_eval_policy`:
@@ -214,12 +164,9 @@ class MCPGateway:
         (``None`` if not yet captured).
 
         If *policy_provider* is provided, it is consulted (with the
-        proposed tool call's ``name`` and ``arguments``) whenever the
-        caller omits the ``policy`` argument, supplying the Rego snippet
-        configured for that tool (typically by ``PolicyMiddleware``). The
-        arguments are passed because a tool may be configured with
-        path rules, which select a policy from the resource path the call
-        names rather than from the tool name alone.
+        proposed tool call's ``name``) whenever the caller omits the
+        ``policy`` argument, supplying the recommended Rego snippet
+        configured for that tool (typically by ``PolicyMiddleware``).
         When neither is available the call returns an MCP tool error
         (``isError=true``) via :class:`fastmcp.exceptions.ToolError`.
         """
@@ -290,9 +237,7 @@ class MCPGateway:
             """
             if policy is None:
                 policy = (
-                    policy_provider(call.name, call.arguments)
-                    if policy_provider is not None
-                    else None
+                    policy_provider(call.name) if policy_provider is not None else None
                 )
                 if policy is None:
                     raise ToolError(
@@ -317,73 +262,47 @@ class MCPGateway:
 
     def _build_proxy(self, server_id: str) -> FastMCP:
         config = self.config[server_id]
-        upstream_client_factory: Callable[[], Client] | None
-        if config["type"] == "stdio":
-            transport = StdioTransport(
-                command=config["command"],
-                args=config["args"],
-                env=config.get("env"),
-                cwd=config.get("cwd"),
-                keep_alive=True,
+        headers = config.get("headers")
+        if "msal" in config:
+            transport = StreamableHttpTransport(
+                url=config["url"],
+                headers=headers,
+                auth=MSALBearerAuth(
+                    token_cache_file=self.token_cache_path,
+                    scopes=config["msal"]["scopes"],
+                    client_id=config["msal"]["client_id"],
+                    tenant_id=config["msal"]["tenant_id"],
+                    callback_port=config["msal"]["callback_port"],
+                ),
             )
-            self._stdio_transports.append(transport)
-
-            def make_stdio_client() -> Client:
-                return Client(transport)
-
-            client = make_stdio_client()
-            # A stdio transport owns a child process. Reusing the proxy's child
-            # for auxiliary calls is not exposed by FastMCP, while opening fresh
-            # clients can collide with upstream-managed local ports. Stdio
-            # upstreams therefore retain fail-closed labels and policies when an
-            # operation would require an auxiliary upstream call.
-            upstream_client_factory = None
+            client = Client(transport)
+        elif "oauth" in config:
+            # GitHub-style providers don't implement OAuth 2.0 Dynamic Client
+            # Registration, so we must use pre-registered client credentials
+            # rather than auth="oauth" (which would attempt DCR and 404).
+            oauth_cfg = config["oauth"]
+            auth = OAuth(
+                mcp_url=config["url"],
+                scopes=oauth_cfg["scopes"],
+                callback_port=oauth_cfg["callback_port"],
+                client_id=oauth_cfg["client_id"],
+                client_secret=oauth_cfg["client_secret"],
+            )
+            transport = StreamableHttpTransport(
+                url=config["url"], headers=headers, auth=auth
+            )
+            client = Client(transport)
         else:
-            headers = config.get("headers")
-            transport: StreamableHttpTransport
-            if "msal" in config:
-                transport = StreamableHttpTransport(
-                    url=config["url"],
-                    headers=headers,
-                    auth=MSALBearerAuth(
-                        token_cache_file=self.token_cache_path,
-                        scopes=config["msal"]["scopes"],
-                        client_id=config["msal"]["client_id"],
-                        tenant_id=config["msal"]["tenant_id"],
-                        callback_port=config["msal"]["callback_port"],
-                    ),
-                )
-                client = Client(transport)
-            elif "oauth" in config:
-                # GitHub-style providers don't implement OAuth 2.0 Dynamic Client
-                # Registration, so we must use pre-registered client credentials
-                # rather than auth="oauth" (which would attempt DCR and 404).
-                oauth_cfg = config["oauth"]
-                auth = OAuth(
-                    mcp_url=config["url"],
-                    scopes=oauth_cfg["scopes"],
-                    callback_port=oauth_cfg["callback_port"],
-                    client_id=oauth_cfg["client_id"],
-                    client_secret=oauth_cfg["client_secret"],
-                )
-                transport = StreamableHttpTransport(
-                    url=config["url"], headers=headers, auth=auth
-                )
-                client = Client(transport)
-            else:
-                transport = StreamableHttpTransport(url=config["url"], headers=headers)
-                client = Client(transport)
-            upstream_client_factory = lambda: Client(transport)
-
+            transport = StreamableHttpTransport(url=config["url"], headers=headers)
+            client = Client(transport)
         proxy = create_proxy(client, name=server_id)
-        if upstream_client_factory is not None:
-            proxy.add_middleware(
-                CaptureServerInfoMiddleware(
-                    server_id=server_id,
-                    upstream_client_factory=upstream_client_factory,
-                    sink=self._record_server_info,
-                )
+        proxy.add_middleware(
+            CaptureServerInfoMiddleware(
+                server_id=server_id,
+                upstream_client_factory=lambda: Client(transport),
+                sink=self._record_server_info,
             )
+        )
 
         # Extract policies configured for this server's PolicyMiddleware
         # (if any) so eval_policy can default to the per-tool recommended
@@ -391,22 +310,17 @@ class MCPGateway:
         # PolicyMiddleware entries are configured they are merged in order
         # (later entries win on key conflicts), mirroring the order they're
         # added to the proxy.
-        configured_policies: dict[str, PolicySpec] = {}
+        configured_policies: dict[str, str] = {}
         for middleware in config.get("middleware", []):
             if middleware["type"] == PolicyMiddleware.__name__:
                 configured_policies.update(resolve_policies(middleware.get("policies")))
 
-        def _policy_for(name: str, arguments: Mapping[str, Any] | None) -> str | None:
-            spec = configured_policies.get(name)
-            policy = select_by_path(spec, arguments) if spec is not None else None
-            if policy is not None:
-                return policy
-            default = configured_policies.get("*")
-            return select_by_path(default, arguments) if default is not None else None
+        def _policy_for(name: str) -> str | None:
+            return configured_policies.get(name) or configured_policies.get("*")
 
         self._register_eval_policy(
             proxy,
-            upstream_client_factory=upstream_client_factory,
+            upstream_client_factory=lambda: Client(transport),
             server_info_provider=lambda: self._upstream_server_info.get(server_id),
             policy_provider=_policy_for,
         )
@@ -444,12 +358,9 @@ class MCPGateway:
             elif middleware["type"] == WorkIQLabellingMiddleware.__name__:
                 proxy.add_middleware(
                     WorkIQLabellingMiddleware(
-                        upstream_client_factory=upstream_client_factory,
-                        labellers=middleware.get("labellers"),
+                        upstream_client_factory=lambda: Client(transport)
                     )
                 )
-            elif middleware["type"] == GitHubLabellingMiddleware.__name__:
-                proxy.add_middleware(GitHubLabellingMiddleware())
             else:
                 raise ValueError(
                     f"Unsupported middleware type '{middleware['type']}' "
@@ -470,15 +381,10 @@ class MCPGateway:
             # Each mounted FastMCP app owns a StreamableHTTPSessionManager task
             # group that must be started via its lifespan; without this the
             # mounted apps respond 500 ("Task group is not initialized").
-            try:
-                async with contextlib.AsyncExitStack() as stack:
-                    for mcp_app in mcp_apps.values():
-                        await stack.enter_async_context(mcp_app.lifespan(app))
-                    yield
-            finally:
-                await asyncio.gather(
-                    *(transport.disconnect() for transport in self._stdio_transports)
-                )
+            async with contextlib.AsyncExitStack() as stack:
+                for mcp_app in mcp_apps.values():
+                    await stack.enter_async_context(mcp_app.lifespan(app))
+                yield
 
         return Starlette(
             routes=[
