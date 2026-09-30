@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -13,9 +14,6 @@ from fastmcp.client.transports.base import ClientTransportT
 from mcp.types import RequestParams, ToolAnnotations, CallToolRequestParams
 
 logger = logging.getLogger(__name__)
-
-
-IFC_POLICY_META_PREFIX = "com.github.ifc/policy"
 
 
 # ---------------------------------------------------------------------------
@@ -76,31 +74,175 @@ class ToolAnnotationsMiddleware(Middleware):
         return tools
 
 
-# ---------------------------------------------------------------------------
-# Middleware to inject policies into the tool metadata returned
-# by ``tools/list``.
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class PathRule:
+    """One entry of a :class:`PathRules` list."""
+
+    pattern: tuple[str, ...]
+    value: str
 
 
-def _merge_policies(tools: Sequence[Tool], policies: dict[str, str]) -> Sequence[Tool]:
-    """Inject IFC_POLICY_META_PREFIX into each tool's ``_meta`` in place.
+@dataclass(frozen=True)
+class PathRules:
+    """A per-tool value selected by a resource path in the call arguments.
 
-    *policies* mirrors the ``policies`` block of the proxy
-    configuration file: a mapping of tool name to a recommended default
-    policy (typically a short Rego snippet) that the gateway advertises to
-    clients via the tool's ``_meta`` field. Tools without an entry are left
-    untouched. Any IFC_LABELS_META_PREFIX = "com.github.ifc/labels" already
-    present on the upstream tool's ``_meta`` is preserved (upstream wins).
+    Work IQ uses dynamic tool discovery with resource-oriented generic
+    tools (``create_entity``, ``do_action``, ``fetch``, ...). The concrete
+    resource is named by a Microsoft Graph resource path in the arguments.
+    A single tool name therefore covers many operations, so anything the
+    gateway binds per tool name (a policy, a labeler) is too coarse.
+    *path_arg* names the argument carrying the resource path and *rules*
+    selects the value from it.
     """
-    default = policies.get("*")
-    for tool in tools:
-        override = policies.get(tool.name)
-        meta = dict(tool.meta) if tool.meta else {}
-        policy = override or default
-        if policy is not None:
-            meta.setdefault(IFC_POLICY_META_PREFIX, policy)
-        tool.meta = meta
-    return tools
+
+    path_arg: str
+    rules: tuple[PathRule, ...]
+
+
+PolicySpec = str | PathRules
+
+
+def _split_path(url: str) -> list[str]:
+    """Split a resource path into its non-empty segments, dropping any
+    query string."""
+    return [segment for segment in url.split("?")[0].split("/") if segment]
+
+
+def _match_pattern(pattern: Sequence[str], segments: Sequence[str]) -> bool:
+    """Match *segments* against a segment-wise glob *pattern*.
+
+    ``*`` matches exactly one segment, ``**`` matches zero or more, and
+    any other segment must match literally (case-insensitively, since
+    Graph resource-path keywords are not case-sensitive while the identifiers
+    between them are opaque).
+    """
+    if not pattern:
+        return not segments
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        # Try every split point, shortest first.
+        for index in range(len(segments) + 1):
+            if _match_pattern(rest, segments[index:]):
+                return True
+        return False
+    if not segments:
+        return False
+    if head != "*" and head.lower() != segments[0].lower():
+        return False
+    return _match_pattern(rest, segments[1:])
+
+
+def match_path(rules: PathRules, url: str) -> str | None:
+    """Return the value of the first rule in *rules* matching *url*, or
+    ``None`` when nothing matches."""
+    segments = _split_path(url)
+    return next(
+        (rule.value for rule in rules.rules if _match_pattern(rule.pattern, segments)),
+        None,
+    )
+
+
+def path_argument_urls(
+    rules: PathRules, arguments: Mapping[str, Any] | None
+) -> list[str] | None:
+    """Return the paths named in ``arguments[rules.path_arg]``.
+
+    The argument may hold a single path or a list of them (``fetch``
+    takes ``entityUrls``). ``None`` is returned when the argument is
+    absent or is not a string / list of strings.
+    """
+    value = (arguments or {}).get(rules.path_arg)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, str) for item in value
+    ):
+        return list(value)
+    return None
+
+
+def select_by_path(spec: PolicySpec, arguments: Mapping[str, Any] | None) -> str | None:
+    """Resolve *spec* to a single value for a call with *arguments*.
+
+    A plain string spec applies to every call. A :class:`PathRules` spec
+    reads ``arguments[spec.path_arg]`` and returns the value of the
+    first rule whose pattern matches, or ``None`` when the argument is
+    missing or nothing matches, so the caller can fall back to its
+    default (for policies, the server's deny entry).
+
+    When the argument holds several paths, every path must select the
+    same value: a call that mixes paths covered by different policies
+    matches nothing and falls back, rather than being cleared by
+    whichever policy happens to come first. Paths that match different
+    rules pointing at the same value are fine, since that value covers
+    them both.
+    """
+    if isinstance(spec, str):
+        return spec
+    urls = path_argument_urls(spec, arguments)
+    if not urls:
+        return None
+
+    selected = [match_path(spec, url) for url in urls]
+    first = selected[0]
+    if first is None or any(value != first for value in selected[1:]):
+        return None
+    return first
+
+
+def resolve_path_rules(
+    spec: Mapping[str, Any],
+    leaf_resolver: Callable[[Mapping[str, Any]], str],
+    *,
+    origin: str,
+) -> PathRules:
+    """Resolve a path-rule config entry.
+
+    The entry has the shape::
+
+        {"pathArg": "parentUrl",
+         "rules": [{"path": "/teams/*/channels/*/messages",
+                    "file": "policies/workiq/teams/messages.rego"}]}
+
+    Each rule's ``path`` is a segment-wise glob (see
+    :func:`_match_pattern`); the rest of the rule is handed to
+    *leaf_resolver*, which differs by consumer (Rego source for
+    policies, a labeler name for labeling). *origin* names the
+    configuration block in error messages.
+    """
+    path_arg = spec.get("pathArg")
+    if not isinstance(path_arg, str) or not path_arg:
+        raise TypeError(
+            f"{origin}: 'pathArg' must be a non-empty string naming "
+            f"the argument that carries the resource path, got {path_arg!r}"
+        )
+    raw_rules = spec.get("rules")
+    if not isinstance(raw_rules, Sequence) or isinstance(raw_rules, (str, bytes)):
+        raise TypeError(
+            f"{origin}: 'rules' must be a list of "
+            "{'path': ..., ...} entries, got "
+            f"{type(raw_rules).__name__}"
+        )
+    if not raw_rules:
+        raise ValueError(f"{origin}: 'rules' must not be empty")
+    rules: list[PathRule] = []
+    for rule in raw_rules:
+        if not isinstance(rule, Mapping):
+            raise TypeError(
+                f"{origin}: each rule must be a mapping, got "
+                f"{type(rule).__name__}: {rule!r}"
+            )
+        path = rule.get("path")
+        if not isinstance(path, str) or not path:
+            raise TypeError(
+                f"{origin}: each rule must carry a non-empty 'path' "
+                f"pattern, got {path!r}"
+            )
+        leaf = {key: value for key, value in rule.items() if key != "path"}
+        rules.append(
+            PathRule(pattern=tuple(_split_path(path)), value=leaf_resolver(leaf))
+        )
+    return PathRules(path_arg=path_arg, rules=tuple(rules))
 
 
 def _resolve_policy_spec(spec: Any) -> str:
@@ -154,23 +296,29 @@ def _resolve_policy_spec(spec: Any) -> str:
 
 def resolve_policies(
     policies: Mapping[str, Any] | None,
-) -> dict[str, str]:
-    """Resolve a ``policies`` config block to a ``{tool_name: rego_text}`` map.
+) -> dict[str, PolicySpec]:
+    """Resolve a ``policies`` config block to a ``{tool_name: spec}`` map.
 
-    Each value in *policies* must be a mapping accepted by
-    :func:`_resolve_policy_spec` (``{"literal": ...}`` or
-    ``{"file": ...}``).
+    Each tool can have one policy, supplied as ``{"literal": ...}`` or
+    ``{"file": ...}``, or a ``pathArg`` / ``rules`` configuration that
+    selects a policy from the call's resource path. Single policies are
+    loaded as Rego strings; resource-path configurations become
+    :class:`PathRules`.
     """
     if not policies:
         return {}
-    return {name: _resolve_policy_spec(spec) for name, spec in policies.items()}
+    return {
+        name: (
+            resolve_path_rules(spec, _resolve_policy_spec, origin="PolicyMiddleware")
+            if isinstance(spec, Mapping) and "pathArg" in spec
+            else _resolve_policy_spec(spec)
+        )
+        for name, spec in policies.items()
+    }
 
 
 class PolicyMiddleware(Middleware):
-    """FastMCP middleware that injects tool policies into the tool metadata.
-
-    - ``on_list_tools`` merges the
-      configured ``policies`` into every ``tools/list`` reply.
+    """Store configured policies for server-side ``eval_policy`` calls.
 
     The policies mapping is supplied at construction time from the
     gateway's middleware config (the ``policies`` block). Each value is
@@ -180,16 +328,7 @@ class PolicyMiddleware(Middleware):
     """
 
     def __init__(self, policies: Mapping[str, Any] | None = None) -> None:
-        self.policies: dict[str, str] = resolve_policies(policies)
-
-    async def on_list_tools(
-        self,
-        context: MiddlewareContext[Any],
-        call_next: CallNext[Any, Sequence[Tool]],
-    ) -> Sequence[Tool]:
-        tools = await call_next(context)
-        tools = _merge_policies(tools, self.policies)
-        return tools
+        self.policies: dict[str, PolicySpec] = resolve_policies(policies)
 
 
 # ---------------------------------------------------------------------------
@@ -393,9 +532,8 @@ class MetaPrefixTranslationMiddleware(Middleware):
       is enough to ensure the client only ever sees client-prefixed
       keys.
 
-    Registering this middleware anywhere else lets canonical-prefixed
-    keys injected by later middleware (most commonly ``PolicyMiddleware``)
-    leak through to the client unchanged.
+    Registering this middleware anywhere else can let canonical-prefixed
+    keys injected by later middleware leak through to the client unchanged.
     """
 
     def __init__(self, prefix_map: dict[str, str]) -> None:

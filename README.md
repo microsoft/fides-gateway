@@ -1,6 +1,8 @@
 # Fides Gateway
 
-A multi-server MCP proxy that sits between an MCP client and one or more remote MCP servers. Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) (`fastmcp>=3.2.0`): under the hood the gateway builds one `fastmcp.server.create_proxy(...)` per upstream and mounts each under `/mcp/<server_id>/` on a single Starlette ASGI application. Per-server middleware can advertise per-tool annotations and OPA Rego policies in `tools/list` responses, label tool results, etc.
+[![Continuous Integration](https://github.com/azure-cto/fides-gateway/actions/workflows/continuous-integration.yml/badge.svg)](https://github.com/azure-cto/fides-gateway/actions/workflows/continuous-integration.yml)
+
+A multi-server MCP proxy that sits between an MCP client and one or more remote MCP servers. Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) (`fastmcp>=3.2.0`): under the hood the gateway builds one `fastmcp.server.create_proxy(...)` per upstream and mounts each under `/mcp/<server_id>/` on a single Starlette ASGI application. Per-server middleware can advertise per-tool annotations, configure OPA Rego policies, label tool results, and more.
 
 The gateway also registers a policy-evaluation tool on every proxy:
 
@@ -58,12 +60,36 @@ The configuration file is a JSON object with a single required top-level key, `m
 
 | Key          | Required | Description                                                                            |
 | ------------ | -------- | -------------------------------------------------------------------------------------- |
-| `type`       | yes      | Must be `"http"`. (Other transports not yet supported.)                                |
-| `url`        | yes      | Streamable HTTP URL of the upstream MCP server.                                        |
+| `type`       | yes      | `"http"` for Streamable HTTP or `"stdio"` for a local child process.                    |
+| `url`        | HTTP     | Streamable HTTP URL of the upstream MCP server.                                        |
+| `command`    | stdio    | Executable used to start a stdio MCP server.                                           |
+| `args`       | no       | String arguments for a stdio server.                                                   |
+| `env`        | no       | String environment overrides for a stdio server.                                      |
+| `cwd`        | no       | Working directory for a stdio server.                                                  |
 | `headers`    | no       | Object of string→string headers added to every upstream request. GH PAT auth lives here.  |
 | `msal`       | no       | MSAL / Entra ID interactive auth. Mutually exclusive with `oauth`. See below.          |
 | `oauth`      | no       | OAuth 2.0 client provider. Supports both Dynamic Client Registration and pre-registered client credentials. Mutually exclusive with `msal`. See below. |
 | `middleware` | no       | Array of middleware entries applied to this proxy in order. See [Middleware](#middleware). |
+
+Stdio upstreams are intended for local MCP server processes. For example, the
+official GitHub MCP server can be started directly:
+
+```json
+"github": {
+  "type": "stdio",
+  "command": "/path/to/github-mcp-server",
+  "args": ["stdio", "--toolsets", "all"],
+  "env": {
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "..."
+  }
+}
+```
+
+The proxy owns the child process for the downstream session. Auxiliary upstream
+sessions are disabled for stdio servers because they can start duplicate child
+processes and collide on server-managed ports. Middleware that can label a
+result from the response alone still produces precise labels; labelers or Rego
+policies that require an auxiliary upstream call fail closed.
 
 #### `msal` (Entra ID / WorkIQ)
 
@@ -171,13 +197,15 @@ Merges configured [`ToolAnnotations`](https://modelcontextprotocol.io/specificat
 
 #### `PolicyMiddleware`
 
-Advertises a recommended Rego policy per tool by stamping `_meta["com.github.ifc/policy"]` onto each tool in `list_tools`. The `"*"` key supplies a fallback; per-tool entries override it; any policy already on the upstream's `_meta` wins. Clients can use `eval_policy` (below) to evaluate these snippets at runtime.
+Configures the Rego policies that the gateway selects when a client calls
+`eval_policy` without supplying an explicit policy. Policies are enforced
+server-side and are not advertised in `tools/list`.
 
 Each entry in `policies` is a mapping that selects the policy source:
 
 - `{ "literal": "<rego source>" }` — use the given string verbatim.
 - `{ "file": "<path/to/policy.rego>" }` — read the policy from a file at startup. Relative paths are resolved against the gateway's working directory.
-
+- `{ "pathArg": "<argument name>", "rules": [ ... ] }` — pick the policy from the resource path the call names, described below.
 ```json
 { "type": "PolicyMiddleware",
   "policies": {
@@ -186,6 +214,31 @@ Each entry in `policies` is a mapping that selects the policy source:
   }
 }
 ```
+
+**Selecting a policy by resource path.** Some servers use dynamic tool discovery with a resource-oriented tool surface: a generic tool names its target resource in an argument, so the tool name alone does not say what the call does. For those tools, a rule list routes the call to a policy by that argument's value. `pathArg` names the argument holding the resource path (a string, or a list of strings), and each rule pairs a `path` pattern with a policy source:
+
+```json
+{ "type": "PolicyMiddleware",
+  "policies": {
+    "*": { "file": "policies/deny.rego" },
+    "create_entity": {
+      "pathArg": "parentUrl",
+      "rules": [
+        { "path": "/chats/*/messages",          "file": "policies/teams_message.rego" },
+        { "path": "/teams/*/channels/*/messages","file": "policies/teams_message.rego" }
+      ]
+    }
+  }
+}
+```
+
+Pattern syntax: paths are split on `/` and compared segment by segment, ignoring any query string. `*` matches exactly one segment, `**` matches zero or more, and every other segment is matched case-insensitively. The first matching rule wins, so order the list from most to least specific.
+
+Two properties follow from this. If a resource path matches no rule, `eval_policy` uses the `"*"` policy; binding `"*"` to a deny policy therefore denies unrouted paths. If `pathArg` holds a list, every resource path must select the same policy. When the paths select different policies, no per-tool policy is selected and `eval_policy` again uses the `"*"` policy.
+
+Work IQ's `search_paths` and `get_schema` provide a dynamic-tool-discovery layer for concrete operations, while the gateway selects the matching policy when `eval_policy` receives the proposed call and its arguments.
+
+Resource-path routing only chooses which policy `eval_policy` evaluates. The selected policy must independently validate the exact resource path and operation rather than relying on routing alone.
 
 #### `OutputSchemaMiddleware`
 
@@ -225,6 +278,26 @@ Labelers may also be `async` and accept an injected `call_upstream(tool_name, ar
 { "type": "WorkIQLabellingMiddleware" }
 ```
 
+For a generic `fetch` tool, the tool name does not identify the resource that was read. The optional `labellers` block therefore selects a named labeler from each `entityUrls` resource path. Labeler names refer to functions registered in [`workiq_labeller.py`](workiq_labeller.py), and `path` uses the pattern syntax described under `PolicyMiddleware`:
+
+```json
+{ "type": "WorkIQLabellingMiddleware",
+  "labellers": {
+    "fetch": {
+      "pathArg": "entityUrls",
+      "rules": [
+        { "path": "/chats/*/members",     "labeller": "teamsMembers" },
+        { "path": "/chats/*/messages/**", "labeller": "teamsMessages" }
+      ]
+    }
+  }
+}
+```
+
+Unlike a policy rule, each labeling rule names a registered labeler function rather than a Rego source. An unknown labeler name causes gateway startup to fail.
+
+If a resource path matches no labeling rule, the gateway labels that result with an **empty reader set** rather than treating it as public. A later policy therefore cannot infer that any recipient is authorized and must request approval before forwarding the data. If the `labellers` block is omitted, this empty-reader label applies to every generic `fetch` result, so Work IQ configurations should list every supported resource path explicitly.
+
 The default `_build_proxy` dispatch raises `ValueError` for unknown middleware types. Custom middleware can be attached programmatically via `gateway.add_middleware(server_id, middleware)`.
 
 ### `eval_policy`
@@ -234,7 +307,7 @@ Every proxy automatically advertises an `eval_policy` tool of its own, which eva
 `eval_policy` takes two arguments:
 
 - `call` — the proposed tool call in the wire-level `CallToolRequestParams` shape: `call.name` is the tool that would be invoked, `call.arguments` is a flat mapping of argument name to raw value, and `call._meta["com.github.ifc/labels"]` carries the IFC labels (see [Labels in `_meta`](#labels-in-_meta) below).
-- `policy` *(optional)* — the Rego policy text to evaluate. The policy must declare `package policy`; `call.name` and `call.arguments` are exposed flat as `input.name` and `input.arguments`. When omitted, the gateway falls back to the recommended Rego policy that `PolicyMiddleware` advertises for `call.name` in `tools/list` (under the `_meta` key named by `IFC_POLICY_META_PREFIX`, which defaults to `"com.github.ifc/policy"`), with the `"*"` wildcard entry used as a per-server fallback. If no `policy` argument is supplied and no policy is configured for the tool, `eval_policy` returns an MCP tool error (`isError=true`).
+- `policy` *(optional)* — the Rego policy text to evaluate. The policy must declare `package policy`; `call.name` and `call.arguments` are exposed flat as `input.name` and `input.arguments`. When omitted, the gateway selects the policy configured for `call.name`, with the `"*"` wildcard entry used as a per-server fallback. When the tool is configured with resource-path rules, the policy is selected from the resource path in `call.arguments` (see `PolicyMiddleware` above), and a path matching no rule falls back to `"*"` as well. If no `policy` argument is supplied and no policy is configured for the tool, `eval_policy` returns an MCP tool error (`isError=true`).
 
 After evaluating the policy, `eval_policy` returns the result of the Rego query `data.policy.decision` as the tool's structured result. The policy is expected to define `decision` (typically as `{allow: bool, msg: string}`, though the gateway doesn't enforce a particular shape); whatever value `data.policy.decision` resolves to is what the caller receives.
 
@@ -362,6 +435,69 @@ msg := sprintf(
 
 Each `eval_policy` invocation opens a fresh upstream MCP client (built from the same transport the proxy uses, including any `headers` / `msal` / `oauth` auth) and re-discovers the upstream tool list, so the set of available `upstream.*` extensions always matches what the gateway is currently proxying.
 
+#### Resource-path policies for Work IQ
+
+Work IQ uses **dynamic tool discovery with a resource-oriented tool surface**. MCP `tools/list` exposes a handful of generic tools (`fetch`, `create_entity`, `update_entity`, `delete_entity`, `do_action`, ...), while `search_paths` and `get_schema` discover the available concrete operations and their schemas. The selected resource is passed to the generic tool as a Microsoft Graph resource path (`/me/messages`, `/teams/.../messages`, and so on). `PolicyMiddleware` keys the config's `policies` map **by tool name** and routes tool calls to individual policies according to the Microsoft Graph path specified in the call arguments.
+
+The resource-path rules described under [`PolicyMiddleware`](#policymiddleware) exist for exactly this. The shipped config routes `create_entity` on its `parentUrl`:
+
+```json
+"create_entity": {
+  "pathArg": "parentUrl",
+  "rules": [
+    { "path": "/chats/*/messages",                     "file": "policies/workiq/teams/messages.rego" },
+    { "path": "/teams/*/channels/*/messages",          "file": "policies/workiq/teams/messages.rego" },
+    { "path": "/teams/*/channels/*/messages/*/replies","file": "policies/workiq/teams/messages.rego" }
+  ]
+}
+```
+
+Two properties are worth calling out here:
+
+- **Unrouted paths stay denied.** If no rule matches, `eval_policy` uses the server's `"*"` policy, `deny.rego`. Adding a Teams policy therefore does not allow calendar or file creation.
+- **Mixed calls stay denied.** `fetch` takes a list in `entityUrls`, so one call can name several resource paths. If those paths select different policies, `eval_policy` uses the `"*"` deny policy instead of choosing one of them.
+
+The Work IQ configuration uses these policies:
+
+- [`policies/workiq/teams/messages.rego`](policies/workiq/teams/messages.rego): posting a Teams chat or channel message. Reads the target membership list with `upstream.fetch({"entityUrls": ["/chats/{id}/members?$select=..."]})` and requires the content's confidentiality label to cover every member (matched by AAD `userId` or mail address). If the complete membership cannot be retrieved, the policy requires approval.
+- [`policies/allow.rego`](policies/allow.rego): tools explicitly configured for unconditional access, currently the supported read and discovery tools.
+- [`policies/deny.rego`](policies/deny.rego): the `"*"` fallback for tools and resource paths without a matching policy.
+
+The Teams message policy independently parses and validates the resource path after routing selects it.
+
+The `labellers` block selects a labeler for each `entityUrls` resource path. [`workiq_labeller.py`](workiq_labeller.py) labels chat and channel messages with the target conversation's members, labels membership-list responses with the listed members, and joins the labels when one `fetch` call contains multiple paths. For other known Work IQ tools, the gateway assigns one default IFC label to the complete result rather than separate labels to individual fields:
+
+- Results from `ask`, `fetch_blob`, and `delete_entity` are labeled untrusted/private.
+- Results from `search_paths` and `get_schema` are labeled trusted/public because they contain server-owned API metadata.
+- Results from `list_agents` are labeled trusted/private because their contents depend on user configuration.
+
+Results from any other Work IQ tool default to untrusted/private until a more precise labeler is configured. These defaults are intentionally coarse-grained. Field-level labels for mixed-content responses remain follow-up work.
+
+`OutputSchemaMiddleware` publishes and validates fixed response schemas for `ask`, `search_paths`, `fetch_blob`, and `delete_entity`. Schemas for resource-path-dependent tools remain follow-up work.
+
+These policies do not currently require a specific Work IQ server version: `expected_version` is empty, so the version compatibility check is disabled. They instead validate the concrete resource path and operation when the client calls the `eval_policy` tool. Set `expected_version` to a stable Work IQ server version when that compatibility contract is available.
+
+##### Testing the Work IQ policies
+
+Offline, with no auth and no network:
+
+```
+uv run pytest tests/test_workiq_policies.py \
+              tests/test_workiq_fetch_labeller.py \
+              tests/test_workiq_integration.py \
+              tests/test_path_policy_selection.py
+```
+
+`tests/test_workiq_policies.py` and `tests/test_workiq_fetch_labeller.py` test the policies and labelers directly with fake `ifc.label` and `upstream.fetch` extensions. `tests/test_workiq_integration.py` runs the complete flow against an in-process Work IQ stub: the middleware labels fetched channel messages, and `eval_policy` then uses those labels with the real Rego files. Posting back to the source channel returns `allow`; posting the same content to a channel with additional members returns `ask`. `tests/test_path_policy_selection.py` verifies resource-path routing, including that an uncovered path such as `/me/events` uses the `"*"` fallback policy.
+
+Against the live server, copy [`config.workiq.example.json`](config.workiq.example.json) to `config.json` and set `msal.clientId` to an app registration entitled to Work IQ. The resource, authorization server and scope in the example are the ones the server itself advertises:
+
+```
+curl -s https://workiq.svc.cloud.microsoft/.well-known/oauth-protected-resource/mcp
+```
+
+Then run `python gateway.py`, point a client at `http://127.0.0.1:9090/mcp/WorkIQ/`, and use `fetch` followed by `eval_policy` on a proposed `create_entity` call. To iterate on the Rego itself against the live upstream, use the [playground](playground/README.md): `cd playground && uv run fides-playground --server WorkIQ`.
+
 #### Reading the upstream's `serverInfo` from Rego: `upstream.serverInfo()`
 
 The upstream MCP server's identity (the `Implementation` block of its `InitializeResult` — `name`, `title`, `version`, `websiteUrl`, `icons`) is exposed to Rego as an arity-0 extension:
@@ -414,7 +550,7 @@ flowchart LR
     GH  -- "headers + OAuth/PAT" --> GHRemote
     WIQ -- "Bearer (MSAL)"       --> WIQRemote
 
-    GH  -. "on_list_tools" .- StripGH["StripFastmcpMetaMiddleware<br/>+ ToolAnnotations<br/>+ Policy"]
+    GH  -. "on_list_tools" .- StripGH["StripFastmcpMetaMiddleware<br/>+ ToolAnnotations"]
     WIQ -. "on_call_tool / on_list_tools" .- StripWIQ["WorkIQLabellingMiddleware<br/>+ OutputSchema (optional)"]
 ```
 
@@ -430,11 +566,9 @@ The codebase is split along the same line:
 - [`label_conversion.py`](label_conversion.py) — the `LabelConversionMiddleware` that rewrites IFC-label principals between Microsoft user IDs (used internally by labelers and policies) and the GitHub handles exposed to clients, plus the `microsoft_to_github` / `github_to_microsoft` lookup helpers backing it. Reads [`user_mapping.json`](user_mapping.json) once at first use and caches both the forward (Microsoft ID → entry) and reverse (GitHub handle → Microsoft IDs) tables.
 - [`msal_auth.py`](msal_auth.py) — the MSAL token-cache helpers and `MSALBearerAuth` httpx adapter.
 
-### Recommended per-tool policies (`PolicyMiddleware`)
+### Configured per-tool policies (`PolicyMiddleware`)
 
-`PolicyMiddleware` surfaces a recommended Rego snippet per tool by stamping it onto the tool's `_meta` under the key named by `IFC_POLICY_META_PREFIX` — which defaults to `"com.github.ifc/policy"` (the MCP spec's open extension point; clients that know the key can read it, clients that don't simply ignore it). Combined with `eval_policy`, this lets a server *recommend* a policy and a client run it client-side without the two having to agree on a side-channel.
-
-The `"*"` key in the `policies` mapping supplies a fallback applied to every tool; per-tool entries override the wildcard; any `IFC_POLICY_META_PREFIX` entry already set by the upstream wins over both — configuration only fills in what upstream did not provide. See the `PolicyMiddleware` entry in [Middleware](#middleware) for the config shape.
+`PolicyMiddleware` stores the Rego policies used by server-side `eval_policy` calls. The `"*"` key supplies a fallback, per-tool entries override it, and resource-path rules can select a more specific policy from the proposed call's arguments. These policies are not added to tool metadata returned by `tools/list`.
 
 ## Tests
 
@@ -446,6 +580,8 @@ uv run pytest -v
 Tests live under [`tests/`](tests/) and use an in-memory FastMCP backend wired via `FastMCPTransport`, plus monkeypatched MSAL / OAuth so no real auth round-trips are performed.
 
 - [`tests/test_gateway.py`](tests/test_gateway.py) — end-to-end coverage of the gateway proper: config loading and validation, the MSAL token-cache helpers and `MSALBearerAuth` adapter, per-server `MCPGateway` construction (MSAL / OAuth / DCR / static credentials / headers), the Starlette mounts, and each `middleware.py` / `output_schema.py` / `workiq_labeller.py` middleware behaviour through the config-driven dispatch. The in-memory FastMCP backend deliberately mirrors the WorkIQ wire shape (escaped-JSON `content[0].text` + `CorrelationId: ...` `content[1]`, no `structured_content`) so every upstream-reading code path exercises [`extract_structured_content`](mcp_result.py).
+- [`tests/test_path_policy_selection.py`](tests/test_path_policy_selection.py) — covers the resource-path policy selection `PolicyMiddleware` uses for resource-oriented tools: the segment matcher (`*`, `**`, case-insensitive literals, query-string stripping, first-match-wins), the `"*"` fallback for unrouted paths and calls whose paths select different policies, configuration errors, and the expected policy and labeler for each covered path in [`config.workiq.example.json`](config.workiq.example.json).
+- [`tests/test_workiq_policies.py`](tests/test_workiq_policies.py), [`tests/test_workiq_fetch_labeller.py`](tests/test_workiq_fetch_labeller.py) and [`tests/test_workiq_integration.py`](tests/test_workiq_integration.py) — the Work IQ policies and labelers, described under [Resource-path policies for Work IQ](#resource-path-policies-for-work-iq).
 - [`tests/test_label_extension.py`](tests/test_label_extension.py) — focused tests for the `ifc.label()` Rego extension and the effective-label resolver: explicit, implicit (descendants-lub), nearest-ancestor, and call-level-fallback resolution; canonical and non-canonical path keys; error cases (inconsistent labels, duplicate non-canonical keys, total-coverage violations); Rego-level end-to-end checks that policies invoking `ifc.label("…")` see the same values as the in-process resolver; and the dynamic-path case where `sprintf` renders a JSONPath from values computed at evaluation time (e.g. `field := "value"; ifc.label(sprintf("$.arguments.%s", [field]))`).
 - [`tests/test_mcp_result.py`](tests/test_mcp_result.py) — unit tests for the [`mcp_result.extract_structured_content`](mcp_result.py) helper: `structured_content` short-circuit, `content[0].text` JSON fallback, trailing-diagnostic-block tolerance, and the `ValueError` failure modes (missing content, non-text `content[0]`, invalid JSON, non-object payload).
 - [`tests/test_workiq_labeller.py`](tests/test_workiq_labeller.py) — verifies `WorkIQLabellingMiddleware` stamps the default IFC label onto every result's `_meta["ifc"]` when no tool-specific labeler matches.

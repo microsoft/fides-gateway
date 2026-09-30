@@ -1,0 +1,12 @@
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+typings/
+*.lock
+config.json
+*.bak
