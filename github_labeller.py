@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -67,11 +68,11 @@ _TRUSTED_METADATA_NAMES = {
 }
 
 
-def _labels(integrity: str) -> IFCLabels:
+def _labels(integrity: str, readers: tuple[str, ...] = ()) -> IFCLabels:
     # Repository visibility and membership are not available in every tool
     # result, so confidentiality remains fail-closed until an audience-aware
     # GitHub policy widens it.
-    return IFCLabels(integrity=integrity, confidentiality=[])
+    return IFCLabels(integrity=integrity, confidentiality=list(readers))
 
 
 def _path(parent: str, key: str | int) -> str:
@@ -105,11 +106,14 @@ def _label_payload(
     labels: dict[str, IFCLabels],
     field: str | None = None,
     trusted_container: bool = False,
+    readers: tuple[str, ...] = (),
 ) -> None:
     current_trusted = _is_trusted_metadata(field, value, trusted_container)
     if isinstance(value, dict):
         if not value:
-            labels[path] = _labels("trusted" if current_trusted else "untrusted")
+            labels[path] = _labels(
+                "trusted" if current_trusted else "untrusted", readers
+            )
             return
         child_trusted = current_trusted or (
             field is not None and field.lower() in _TRUSTED_METADATA_CONTAINERS
@@ -121,11 +125,14 @@ def _label_payload(
                 labels,
                 key,
                 child_trusted,
+                readers,
             )
         return
     if isinstance(value, list):
         if not value:
-            labels[path] = _labels("trusted" if current_trusted else "untrusted")
+            labels[path] = _labels(
+                "trusted" if current_trusted else "untrusted", readers
+            )
             return
         for index, child in enumerate(value):
             _label_payload(
@@ -134,9 +141,10 @@ def _label_payload(
                 labels,
                 field,
                 current_trusted,
+                readers,
             )
         return
-    labels[path] = _labels("trusted" if current_trusted else "untrusted")
+    labels[path] = _labels("trusted" if current_trusted else "untrusted", readers)
 
 
 def _github_payload(result: ToolResult) -> dict[str, Any] | None:
@@ -156,16 +164,53 @@ def _github_payload(result: ToolResult) -> dict[str, Any] | None:
 class GitHubLabellingMiddleware(Middleware):
     """Label GitHub-controlled metadata as trusted and all other data as untrusted."""
 
+    def __init__(self, repository_readers: dict[str, list[str]] | None = None) -> None:
+        self.repository_readers: dict[str, tuple[str, ...]] = {}
+        if repository_readers is not None and not isinstance(repository_readers, dict):
+            raise ValueError("repositoryReaders must map repositories to reader lists")
+        for repository, readers in (repository_readers or {}).items():
+            if not isinstance(repository, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
+            ):
+                raise ValueError("repositoryReaders keys must be owner/repo names")
+            if (
+                not isinstance(readers, list)
+                or not all(
+                    isinstance(reader, str) and reader.strip() for reader in readers
+                )
+                or ("public" in readers and len(readers) != 1)
+            ):
+                raise ValueError(
+                    "repositoryReaders values must be reader lists; public must stand alone"
+                )
+            key = repository.casefold()
+            if key in self.repository_readers:
+                raise ValueError(f"duplicate repositoryReaders entry: {repository}")
+            self.repository_readers[key] = tuple(sorted(set(readers)))
+
+    def _readers(self, call: CallToolRequestParams) -> tuple[str, ...]:
+        arguments = call.arguments or {}
+        if call.name != "issue_read" or arguments.get("method") not in {
+            "get",
+            "get_comments",
+        }:
+            return ()
+        owner, repository = arguments.get("owner"), arguments.get("repo")
+        if not isinstance(owner, str) or not isinstance(repository, str):
+            return ()
+        return self.repository_readers.get(f"{owner}/{repository}".casefold(), ())
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[CallToolRequestParams],
         call_next: CallNext[CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         result = await call_next(context)
-        labels: dict[str, IFCLabels] = {"$": _labels("untrusted")}
+        readers = self._readers(context.message)
+        labels: dict[str, IFCLabels] = {"$": _labels("untrusted", readers)}
         payload = _github_payload(result)
         if payload is not None:
-            _label_payload(payload, "$['structuredContent']", labels)
+            _label_payload(payload, "$['structuredContent']", labels, readers=readers)
 
         meta = dict(result.meta) if result.meta else {}
         meta[IFC_LABELS_META_PREFIX] = {

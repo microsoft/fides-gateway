@@ -85,6 +85,19 @@ official GitHub MCP server can be started directly:
 }
 ```
 
+`GitHubLabellingMiddleware` accepts an optional `repositoryReaders` map from
+case-insensitive `owner/repo` names to authoritative reader lists. It applies only
+to `issue_read` methods `get` and `get_comments`, with explicit `owner` and `repo`
+arguments. Hierarchy methods, which can return another repository's issues, are
+not covered. For example,
+`{"type": "GitHubLabellingMiddleware", "repositoryReaders":
+{"example/service": ["alice", "user"]}}` confines results to those principals.
+Use `["public"]` only for public repositories. These are trusted operator
+assertions, not ACLs inferred from issue content or a live membership lookup.
+Unconfigured repositories, search tools, and calls without repository scope
+retain an empty reader set. Content stays untrusted regardless of audience;
+GitHub-controlled metadata retains its field-level integrity labels.
+
 The proxy owns the child process for the downstream session. Auxiliary upstream
 sessions are disabled for stdio servers because they can start duplicate child
 processes and collide on server-managed ports. Middleware that can label a

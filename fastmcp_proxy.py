@@ -449,7 +449,11 @@ class MCPGateway:
                     )
                 )
             elif middleware["type"] == GitHubLabellingMiddleware.__name__:
-                proxy.add_middleware(GitHubLabellingMiddleware())
+                proxy.add_middleware(
+                    GitHubLabellingMiddleware(
+                        repository_readers=middleware.get("repositoryReaders")
+                    )
+                )
             else:
                 raise ValueError(
                     f"Unsupported middleware type '{middleware['type']}' "

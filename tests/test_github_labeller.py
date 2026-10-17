@@ -98,3 +98,68 @@ async def test_github_labeller_fails_closed_for_non_json_results() -> None:
     assert result.meta[IFC_LABELS_META_PREFIX] == {
         "$": {"integrity": "untrusted", "confidentiality": []}
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "arguments", "readers"),
+    [
+        (
+            "issue_read",
+            {"owner": "Aurora", "repo": "service", "method": "get"},
+            ["alice", "user"],
+        ),
+        (
+            "issue_read",
+            {"owner": "aurora", "repo": "service", "method": "get_comments"},
+            ["alice", "user"],
+        ),
+        ("issue_read", {"owner": "aurora", "repo": "other", "method": "get"}, []),
+        (
+            "issue_read",
+            {"owner": "aurora", "repo": "service", "method": "get_parent"},
+            [],
+        ),
+        ("issue_read", {}, []),
+        ("search_issues", {"owner": "aurora", "repo": "service"}, []),
+    ],
+)
+async def test_repository_audience_requires_an_exact_scoped_read(
+    name: str, arguments: dict, readers: list[str]
+) -> None:
+    middleware = GitHubLabellingMiddleware({"aurora/service": ["user", "alice"]})
+    context = MiddlewareContext(
+        message=CallToolRequestParams(name=name, arguments=arguments),
+        method="tools/call",
+    )
+
+    async def call_next(_context: object) -> ToolResult:
+        return ToolResult.model_construct(
+            content=[],
+            meta={},
+            structured_content={"number": 7, "body": "Private issue"},
+        )
+
+    result = await middleware.on_call_tool(context, call_next)
+    labels = result.meta[IFC_LABELS_META_PREFIX]
+    assert labels["$"] == {"integrity": "untrusted", "confidentiality": readers}
+    assert labels["$['structuredContent']['body']"] == labels["$"]
+    assert labels["$['structuredContent']['number']"] == {
+        "integrity": "trusted",
+        "confidentiality": readers,
+    }
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"aurora/service": "public"},
+        {"aurora/service": ["public", "user"]},
+        {"aurora/service": [""]},
+        {"not-a-repository": ["user"]},
+        {"Aurora/service": ["user"], "aurora/service": ["alice"]},
+    ],
+)
+def test_repository_audience_rejects_invalid_configuration(mapping) -> None:
+    with pytest.raises(ValueError):
+        GitHubLabellingMiddleware(mapping)
