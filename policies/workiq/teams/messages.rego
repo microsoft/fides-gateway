@@ -20,7 +20,7 @@ import rego.v1
 # policy stays fail-closed if it is ever bound to a wider set of paths
 # than it covers.
 #
-# See ``../allow.rego`` for why ``expected_version`` is
+# See ``../../allow.rego`` for why ``expected_version`` is
 # unpinned by default.
 
 expected_version := ""
@@ -35,11 +35,16 @@ deny(msg) := {"decision": "deny", "message": msg}
 
 ask(msg) := {"decision": "ask", "message": msg}
 
-incompatible_version if {
+compatible_version if {
+	expected_version == ""
+}
+
+compatible_version if {
 	info != null
 	semver.is_valid(expected_version)
+	is_string(info.version)
 	semver.is_valid(info.version)
-	not semver.compare(info.version, expected_version) == 0
+	semver.compare(info.version, expected_version) == 0
 }
 
 # Request shape
@@ -159,11 +164,11 @@ msg := sprintf(
 # Decision
 
 decision := deny("The policy is incompatible with the server version.") if {
-	incompatible_version
-} else := allow("The tool call was generated in a trusted context.") if {
-	context_trusted
+	not compatible_version
 } else := deny("Creating entities at this path is not covered by a policy.") if {
 	not members_url
+} else := allow("The tool call was generated in a trusted context.") if {
+	context_trusted
 } else := allow("The message content is public.") if {
 	content_public
 } else := ask("The membership of the target conversation could not be verified.") if {

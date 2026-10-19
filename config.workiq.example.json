@@ -121,6 +121,14 @@
               "pathArg": "parentUrl",
               "rules": [
                 {
+                  "path": "/me/events",
+                  "file": "policies/workiq/calendar/events.rego"
+                },
+                {
+                  "path": "/me/calendar/events",
+                  "file": "policies/workiq/calendar/events.rego"
+                },
+                {
                   "path": "/chats/*/messages",
                   "file": "policies/workiq/teams/messages.rego"
                 },
@@ -139,6 +147,19 @@
                 {
                   "path": "/teams/*/channels/*/messages/*/replies",
                   "file": "policies/workiq/teams/messages.rego"
+                }
+              ]
+            },
+            "update_entity": {
+              "pathArg": "entityUrl",
+              "rules": [
+                {
+                  "path": "/me/events/*",
+                  "file": "policies/workiq/calendar/events.rego"
+                },
+                {
+                  "path": "/me/calendar/events/*",
+                  "file": "policies/workiq/calendar/events.rego"
                 }
               ]
             }

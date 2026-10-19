@@ -214,10 +214,9 @@ def _shipped_create_entity_policy() -> PathRules:
         ("/users/u1/chats/19:abc@thread.v2/messages", "teams/messages"),
         ("/teams/t1/channels/c1/messages", "teams/messages"),
         ("/teams/t1/channels/c1/messages/m1/replies", "teams/messages"),
-        # Nothing has been written for these yet, so they must fall
-        # through to the server's deny default rather than borrowing the
-        # Teams messaging policy.
-        ("/me/events", None),
+        ("/me/events", "calendar/events"),
+        ("/me/calendar/events", "calendar/events"),
+        ("/users/u1/events", None),
         ("/me/drive/root/children", None),
         ("/teams/t1/channels", None),
     ],
@@ -233,6 +232,32 @@ def test_shipped_config_routes_create_entity(
     else:
         assert policy is not None
         assert (POLICIES / f"{expected}.rego").read_text(encoding="utf-8") == policy
+
+
+@pytest.mark.parametrize(
+    "path,covered",
+    [
+        ("/me/events/e1", True),
+        ("/me/calendar/events/e1?sendUpdates=all", True),
+        ("/me/events", False),
+        ("/me/events/e1/attachments", False),
+        ("/me/messages/m1", False),
+        ("/users/u1/events/e1", False),
+    ],
+)
+def test_shipped_config_routes_only_personal_calendar_updates(path, covered):
+    config = json.loads(
+        (Path(__file__).parents[1] / "config.workiq.example.json").read_text()
+    )
+    policy_config = next(
+        item["policies"]
+        for item in config["mcpServers"]["workiq"]["middleware"]
+        if item["type"] == "PolicyMiddleware"
+    )
+    policy = select_by_path(
+        resolve_policies(policy_config)["update_entity"], {"entityUrl": path}
+    )
+    assert (policy is not None) is covered
 
 
 # The same machinery drives labeling

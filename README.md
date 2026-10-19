@@ -460,19 +460,22 @@ The resource-path rules described under [`PolicyMiddleware`](#policymiddleware) 
   "rules": [
     { "path": "/chats/*/messages",                     "file": "policies/workiq/teams/messages.rego" },
     { "path": "/teams/*/channels/*/messages",          "file": "policies/workiq/teams/messages.rego" },
-    { "path": "/teams/*/channels/*/messages/*/replies","file": "policies/workiq/teams/messages.rego" }
+    { "path": "/teams/*/channels/*/messages/*/replies","file": "policies/workiq/teams/messages.rego" },
+    { "path": "/me/events",                           "file": "policies/workiq/calendar/events.rego" },
+    { "path": "/me/calendar/events",                  "file": "policies/workiq/calendar/events.rego" }
   ]
 }
 ```
 
 Two properties are worth calling out here:
 
-- **Unrouted paths stay denied.** If no rule matches, `eval_policy` uses the server's `"*"` policy, `deny.rego`. Adding a Teams policy therefore does not allow calendar or file creation.
+- **Unrouted paths stay denied.** If no rule matches, `eval_policy` uses the server's `"*"` policy, `deny.rego`. Calendar creation has its own rules; file creation and other uncovered operations remain denied.
 - **Mixed calls stay denied.** `fetch` takes a list in `entityUrls`, so one call can name several resource paths. If those paths select different policies, `eval_policy` uses the `"*"` deny policy instead of choosing one of them.
 
 The Work IQ configuration uses these policies:
 
 - [`policies/workiq/teams/messages.rego`](policies/workiq/teams/messages.rego): posting a Teams chat or channel message. Reads the target membership list with `upstream.fetch({"entityUrls": ["/chats/{id}/members?$select=..."]})` and requires the content's confidentiality label to cover every member (matched by AAD `userId` or mail address). If the complete membership cannot be retrieved, the policy requires approval.
+- [`policies/workiq/calendar/events.rego`](policies/workiq/calendar/events.rego): creating events under `/me/events` or `/me/calendar/events`, and updating individual events there. The modeled audience includes the Calendar owner, organizer, and attendees. For private content from an untrusted context, checks the mailbox owner and proposed recipients, including any supplied organizer. Updates also check the existing organizer and attendees, including removed attendees who may receive cancellation notices. An unknown or unauthorized audience requires approval. Other mailboxes, shared-calendar paths, deletion, and actions remain denied.
 - [`policies/allow.rego`](policies/allow.rego): tools explicitly configured for unconditional access, currently the supported read and discovery tools.
 - [`policies/deny.rego`](policies/deny.rego): the `"*"` fallback for tools and resource paths without a matching policy.
 
@@ -484,11 +487,25 @@ The `labellers` block selects a labeler for each `entityUrls` resource path. [`w
 - Results from `search_paths` and `get_schema` are labeled trusted/public because they contain server-owned API metadata.
 - Results from `list_agents` are labeled trusted/private because their contents depend on user configuration.
 
+Calendar fetch labels include the owner, organizer, and attendees. Default
+Calendar ownership comes from `/me`; named Calendar ownership comes from the
+Calendar's `owner` metadata, not from a submitted event organizer. If ownership
+cannot be verified, the result remains untrusted/private with no known readers.
+This audience model does not discover additional sharing or delegation grants.
+
 Results from any other Work IQ tool default to untrusted/private until a more precise labeler is configured. These defaults are intentionally coarse-grained. Field-level labels for mixed-content responses remain follow-up work.
 
 `OutputSchemaMiddleware` publishes and validates fixed response schemas for `ask`, `search_paths`, `fetch_blob`, and `delete_entity`. Schemas for resource-path-dependent tools remain follow-up work.
 
-These policies do not currently require a specific Work IQ server version: `expected_version` is empty, so the version compatibility check is disabled. They instead validate the concrete resource path and operation when the client calls the `eval_policy` tool. Set `expected_version` to a stable Work IQ server version when that compatibility contract is available.
+These policies do not require a particular FastMCP transport version. A proxy can
+advertise its FastMCP version instead of the underlying Work IQ service version;
+comparing that value with a framework version does not establish API
+compatibility. `expected_version` is empty by default, consistent with the generic
+allow/deny policies and the resource-path checks above. Operators with a stable
+upstream service version contract can set `expected_version`; a pin rejects
+mismatched, missing, or invalid upstream versions. Unrouted writes still use
+`deny.rego`, and tool schemas, output schemas, and IFC labels remain independently
+validated.
 
 ##### Testing the Work IQ policies
 
@@ -501,7 +518,7 @@ uv run pytest tests/test_workiq_policies.py \
               tests/test_path_policy_selection.py
 ```
 
-`tests/test_workiq_policies.py` and `tests/test_workiq_fetch_labeller.py` test the policies and labelers directly with fake `ifc.label` and `upstream.fetch` extensions. `tests/test_workiq_integration.py` runs the complete flow against an in-process Work IQ stub: the middleware labels fetched channel messages, and `eval_policy` then uses those labels with the real Rego files. Posting back to the source channel returns `allow`; posting the same content to a channel with additional members returns `ask`. `tests/test_path_policy_selection.py` verifies resource-path routing, including that an uncovered path such as `/me/events` uses the `"*"` fallback policy.
+`tests/test_workiq_policies.py` and `tests/test_workiq_fetch_labeller.py` test the policies and labelers directly with fake `ifc.label` and `upstream.fetch` extensions. `tests/test_workiq_integration.py` runs the complete flow against an in-process Work IQ stub: the middleware labels fetched channel messages, and `eval_policy` then uses those labels with the real Rego files. Posting back to the source channel returns `allow`; posting the same content to a channel with additional members returns `ask`. `tests/test_path_policy_selection.py` verifies Calendar and Teams routing, including that an uncovered path such as `/me/drive/root/children` uses the `"*"` fallback policy.
 
 Against the live server, copy [`config.workiq.example.json`](config.workiq.example.json) to `config.json` and set `msal.clientId` to an app registration entitled to Work IQ. The resource, authorization server and scope in the example are the ones the server itself advertises:
 

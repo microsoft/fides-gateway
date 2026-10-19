@@ -30,6 +30,7 @@ POLICIES = Path(__file__).parents[1] / "policies" / "workiq"
 CREATE_ENTITY_POLICY = (POLICIES / "teams" / "messages.rego").read_text(
     encoding="utf-8"
 )
+CALENDAR_POLICY = (POLICIES / "calendar" / "events.rego").read_text(encoding="utf-8")
 
 ENGINEERING_MEMBERS = [
     {
@@ -72,6 +73,14 @@ def _workiq_stub() -> FastMCP:
                 data: dict[str, Any] = {"value": ENGINEERING_MEMBERS}
             elif path == "/teams/team-mkt/channels/channel-mkt/members":
                 data = {"value": MARKETING_MEMBERS}
+            elif path == "/me":
+                data = {"id": "user-alice", "mail": "alice@example.com"}
+            elif path == "/me/events/calendar-review":
+                data = {
+                    "id": "calendar-review",
+                    "organizer": {"emailAddress": {"address": "bob@example.com"}},
+                    "attendees": [{"emailAddress": {"address": "carol@example.com"}}],
+                }
             elif path.endswith("/messages"):
                 data = {"value": [{"id": "msg-1", "body": {"content": "roadmap"}}]}
             else:
@@ -205,3 +214,26 @@ async def test_posting_to_a_wider_channel_requires_approval() -> None:
 
     assert decision["decision"] == "ask"
     assert "carol@example.com" in decision["message"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "source,expected",
+    [("team-eng/channel-eng", "ask"), ("team-mkt/channel-mkt", "allow")],
+)
+async def test_calendar_policy_checks_real_upstream_owner_organizer_and_attendees(
+    source,
+    expected,
+) -> None:
+    team, channel = source.split("/")
+    labels = await _labelled_fetch(f"/teams/{team}/channels/{channel}/messages")
+    decision = await _decide(
+        "update_entity",
+        {
+            "entityUrl": "/me/events/calendar-review",
+            "jsonBody": {"subject": "Channel discussion"},
+        },
+        _call_labels(labels),
+        CALENDAR_POLICY,
+    )
+    assert decision["decision"] == expected

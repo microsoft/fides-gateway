@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Any, Awaitable, Callable, Mapping
 
 from fastmcp import Client
@@ -23,6 +24,8 @@ The returned dict is the upstream tool's structured payload, extracted via
 :func:`mcp_result.extract_structured_content` (i.e. ``structured_content``
 if present, otherwise ``content[0].text`` parsed as JSON).
 """
+
+logger = logging.getLogger(__name__)
 
 
 def _fallback_meta(labels: IFCLabels) -> LabeledMeta:
@@ -351,10 +354,43 @@ async def _label_outlook_mail(
 async def _label_calendar_events(
     url: str, data: Any, call_upstream: CallUpstream
 ) -> PathLabels:
-    del url, call_upstream
+    segments = _path_segments(url)
+    if len(segments) < 2 or segments[0].lower() != "me":
+        logger.warning("Calendar ownership is not supported for %s", url)
+        return {"$": _fail_closed_labels()}
+    named_calendar = len(segments) >= 3 and segments[1].lower() == "calendars"
+    owner_url = (
+        f"/me/calendars/{segments[2]}?$select=owner"
+        if named_calendar
+        else "/me?$select=id,mail,userPrincipalName"
+    )
+    response = await call_upstream("fetch", {"entityUrls": [owner_url]})
+    results = response.get("results")
+    result = results[0] if isinstance(results, list) and results else {}
+    profile = result.get("data") if isinstance(result, dict) else None
+    owner_readers: set[str] = set()
+    if (
+        isinstance(result, dict)
+        and result.get("statusCode") == 200
+        and isinstance(profile, dict)
+    ):
+        if named_calendar:
+            address = _email_address({"emailAddress": profile.get("owner")})
+            if address:
+                owner_readers.add(address)
+        else:
+            owner_readers = {
+                value.strip().lower()
+                for field in ("id", "mail", "userPrincipalName")
+                if isinstance(value := profile.get(field), str) and value.strip()
+            }
+    if not owner_readers:
+        logger.warning("Cannot verify Calendar owner for %s; using private labels", url)
+        return {"$": _fail_closed_labels()}
+
     return _entity_labels(
         data,
-        _calendar_audience,
+        lambda event: sorted(owner_readers | set(_calendar_audience(event))),
         (
             "id",
             "createdDateTime",

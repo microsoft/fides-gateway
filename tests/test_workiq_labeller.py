@@ -229,7 +229,7 @@ async def test_mail_fields_use_sender_and_recipients_as_readers() -> None:
 
 
 @pytest.mark.anyio
-async def test_calendar_fields_use_organizer_and_attendees_as_readers() -> None:
+async def test_calendar_fields_use_owner_organizer_and_attendees_as_readers() -> None:
     output = {
         "results": [
             {
@@ -255,14 +255,32 @@ async def test_calendar_fields_use_organizer_and_attendees_as_readers() -> None:
             }
         ]
     }
+
+    async def owner_lookup(name, arguments):
+        assert name == "fetch"
+        assert arguments == {"entityUrls": ["/me?$select=id,mail,userPrincipalName"]}
+        return {
+            "results": [
+                {
+                    "statusCode": 200,
+                    "data": {"id": "owner-id", "mail": "Owner@example.com"},
+                }
+            ]
+        }
+
     meta = await WorkIQLabeling.labelfetch(
         {"entityUrls": ["/me/events"]},
         output,
-        _unused_upstream,
+        owner_lookup,
         _fetch_rules("/me/events/**", "calendarEvents"),
     )
     labels = _dump_labels(meta)
-    readers = ["attendee@example.com", "organizer@example.com"]
+    readers = [
+        "attendee@example.com",
+        "organizer@example.com",
+        "owner-id",
+        "owner@example.com",
+    ]
 
     assert labels["$['structuredContent']['results'][0]['data']['value'][0]"] == {
         "integrity": "untrusted",
@@ -274,6 +292,58 @@ async def test_calendar_fields_use_organizer_and_attendees_as_readers() -> None:
         "integrity": "trusted",
         "confidentiality": readers,
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status,data", [(404, {}), (200, {}), (200, None)])
+async def test_unknown_calendar_owner_fails_closed(status, data, caplog):
+    async def owner_lookup(name, arguments):
+        return {"results": [{"statusCode": status, "data": data}]}
+
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/me/events"]},
+        {"results": [{"statusCode": 200, "data": {"id": "event-1"}}]},
+        owner_lookup,
+        _fetch_rules("/me/events/**", "calendarEvents"),
+    )
+    assert _dump_labels(meta)["$"] == {
+        "integrity": "untrusted",
+        "confidentiality": [],
+    }
+    assert "Cannot verify Calendar owner" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_named_calendar_uses_calendar_owner_not_current_user():
+    async def owner_lookup(name, arguments):
+        assert arguments == {"entityUrls": ["/me/calendars/shared?$select=owner"]}
+        return {
+            "results": [
+                {
+                    "statusCode": 200,
+                    "data": {"owner": {"address": "owner@example.com"}},
+                }
+            ]
+        }
+
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/me/calendars/shared/calendarView"]},
+        {"results": [{"statusCode": 200, "data": {"id": "event-1"}}]},
+        owner_lookup,
+        _fetch_rules("/me/calendars/*/calendarView/**", "calendarEvents"),
+    )
+    assert _dump_labels(meta)["$"]["confidentiality"] == ["owner@example.com"]
+
+
+@pytest.mark.anyio
+async def test_other_mailbox_does_not_inherit_current_user_as_calendar_owner():
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/users/another-user/events"]},
+        {"results": [{"statusCode": 200, "data": {"id": "event-1"}}]},
+        _unused_upstream,
+        _fetch_rules("/users/*/events/**", "calendarEvents"),
+    )
+    assert _dump_labels(meta)["$"]["confidentiality"] == []
 
 
 @pytest.mark.anyio
