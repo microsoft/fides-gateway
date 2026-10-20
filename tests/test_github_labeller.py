@@ -95,9 +95,11 @@ async def test_github_labeller_fails_closed_for_non_json_results() -> None:
 
     result = await middleware.on_call_tool(_ctx(), call_next)
 
-    assert result.meta[IFC_LABELS_META_PREFIX] == {
-        "$": {"integrity": "untrusted", "confidentiality": []}
-    }
+    assert result.structured_content["content"][0]["text"] == "plain external text"
+    assert all(
+        label == {"integrity": "untrusted", "confidentiality": []}
+        for label in result.meta[IFC_LABELS_META_PREFIX].values()
+    )
 
 
 @pytest.mark.anyio
@@ -122,6 +124,47 @@ async def test_github_labeller_fails_closed_for_non_json_results() -> None:
         ),
         ("issue_read", {}, []),
         ("search_issues", {"owner": "aurora", "repo": "service"}, []),
+        (
+            "search_issues",
+            {"owner": "aurora", "repo": "service", "query": "retry"},
+            ["alice", "user"],
+        ),
+        (
+            "search_issues",
+            {
+                "owner": "aurora",
+                "repo": "service",
+                "query": "retry OR repo:other/private",
+            },
+            [],
+        ),
+        ("search_issues", {"query": "retry"}, []),
+        (
+            "get_file_contents",
+            {"owner": "aurora", "repo": "service", "path": "retry.py"},
+            ["alice", "user"],
+        ),
+        ("get_file_contents", {"owner": "aurora", "repo": "unknown"}, []),
+        (
+            "create_or_update_file",
+            {"owner": "aurora", "repo": "service"},
+            ["alice", "user"],
+        ),
+        (
+            "list_pull_requests",
+            {"owner": "aurora", "repo": "service"},
+            ["alice", "user"],
+        ),
+        (
+            "pull_request_read",
+            {"owner": "aurora", "repo": "service", "method": "get_files"},
+            ["alice", "user"],
+        ),
+        (
+            "pull_request_read",
+            {"owner": "aurora", "repo": "service", "method": "get_reviews"},
+            [],
+        ),
     ],
 )
 async def test_repository_audience_requires_an_exact_scoped_read(

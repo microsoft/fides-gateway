@@ -150,12 +150,21 @@ def _label_payload(
 def _github_payload(result: ToolResult) -> dict[str, Any] | None:
     if result.structured_content is not None:
         return result.structured_content
-    if not result.content or not isinstance(result.content[0], TextContent):
+    if not result.content:
         return None
+    blocks = {
+        "content": [
+            block.model_dump(mode="json", by_alias=True) for block in result.content
+        ]
+    }
+    if not isinstance(result.content[0], TextContent):
+        result.structured_content = blocks
+        return blocks
     try:
         parsed = json.loads(result.content[0].text)
     except json.JSONDecodeError:
-        return None
+        result.structured_content = blocks
+        return blocks
     payload = parsed if isinstance(parsed, dict) else {"result": parsed}
     result.structured_content = payload
     return payload
@@ -190,10 +199,24 @@ class GitHubLabellingMiddleware(Middleware):
 
     def _readers(self, call: CallToolRequestParams) -> tuple[str, ...]:
         arguments = call.arguments or {}
-        if call.name != "issue_read" or arguments.get("method") not in {
-            "get",
-            "get_comments",
-        }:
+        if call.name == "issue_read":
+            supported = arguments.get("method") in {"get", "get_comments"}
+        elif call.name == "search_issues":
+            query = arguments.get("query")
+            supported = isinstance(query, str) and not re.search(
+                r"\b(?:OR|NOT)\b|(?:repo|org|user):", query, re.IGNORECASE
+            )
+        elif call.name == "pull_request_read":
+            supported = arguments.get("method") in {"get", "get_files", "get_diff"}
+        else:
+            supported = call.name in {
+                "get_file_contents",
+                "list_pull_requests",
+                "create_branch",
+                "create_or_update_file",
+                "create_pull_request",
+            }
+        if not supported:
             return ()
         owner, repository = arguments.get("owner"), arguments.get("repo")
         if not isinstance(owner, str) or not isinstance(repository, str):

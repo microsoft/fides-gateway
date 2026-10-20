@@ -12,6 +12,7 @@ from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
+from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.server.middleware import Middleware
 
 from starlette.applications import Starlette
@@ -172,6 +173,7 @@ class MCPGateway:
         # capture failed (the extension surfaces ``None`` to the policy).
         self._upstream_server_info: dict[str, dict[str, Any] | None] = {}
         self._stdio_transports: list[StdioTransport] = []
+        self._stdio_clients: list[Client] = []
 
         # Build one FastMCP proxy per upstream
         self._proxies: dict[str, FastMCP] = {
@@ -328,15 +330,11 @@ class MCPGateway:
             )
             self._stdio_transports.append(transport)
 
-            def make_stdio_client() -> Client:
-                return Client(transport)
-
-            client = make_stdio_client()
-            # A stdio transport owns a child process. Reusing the proxy's child
-            # for auxiliary calls is not exposed by FastMCP, while opening fresh
-            # clients can collide with upstream-managed local ports. Stdio
-            # upstreams therefore retain fail-closed labels and policies when an
-            # operation would require an auxiliary upstream call.
+            client = Client(transport)
+            self._stdio_clients.append(client)
+            # Keep one initialized session as well as one child process.
+            # Fresh clients on a kept-alive transport re-send initialize.
+            # Auxiliary upstream calls remain disabled for stdio policies.
             upstream_client_factory = None
         else:
             headers = config.get("headers")
@@ -375,7 +373,11 @@ class MCPGateway:
                 client = Client(transport)
             upstream_client_factory = lambda: Client(transport)
 
-        proxy = create_proxy(client, name=server_id)
+        proxy = (
+            FastMCPProxy(client_factory=lambda: client, name=server_id)
+            if config["type"] == "stdio"
+            else create_proxy(client, name=server_id)
+        )
         if upstream_client_factory is not None:
             proxy.add_middleware(
                 CaptureServerInfoMiddleware(
@@ -476,6 +478,8 @@ class MCPGateway:
             # mounted apps respond 500 ("Task group is not initialized").
             try:
                 async with contextlib.AsyncExitStack() as stack:
+                    for client in self._stdio_clients:
+                        await stack.enter_async_context(client)
                     for mcp_app in mcp_apps.values():
                         await stack.enter_async_context(mcp_app.lifespan(app))
                     yield
