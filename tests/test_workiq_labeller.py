@@ -8,7 +8,11 @@ from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools import ToolResult
 from mcp.types import CallToolRequestParams, TextContent
 
-from policy_engine import IFC_LABELS_META_PREFIX
+from policy_engine import (
+    IFC_LABELS_META_PREFIX,
+    _build_effective_labels,
+    _resolve_effective_label,
+)
 from workiq_labeller import (
     WorkIQLabeling,
     WorkIQLabellingMiddleware,
@@ -405,3 +409,61 @@ def test_write_response_envelope_is_trusted_but_data_is_not() -> None:
         "integrity": "trusted",
         "confidentiality": ["public"],
     }
+    assert labels["$['structuredContent']['data']"] == {
+        "integrity": "untrusted",
+        "confidentiality": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "fetch_blob",
+        "call_function",
+        "create_entity",
+        "update_entity",
+        "delete_entity",
+        "do_action",
+    ],
+)
+@pytest.mark.parametrize("field", ["data", "unexpected'payload"])
+def test_response_payload_effective_labels_remain_private(tool, field) -> None:
+    payload = {"statusCode": 200, field: {"nested": ["private content"]}}
+    labels = _dump_labels(getattr(WorkIQLabeling, f"label{tool}")({}, payload))
+    effective = _build_effective_labels({"$['structuredContent']": payload}, labels)
+
+    def resolve(*path):
+        return _resolve_effective_label(list(path), labels, effective, "test response")
+
+    private = {"integrity": "untrusted", "confidentiality": []}
+    assert resolve("structuredContent") == private
+    assert resolve("structuredContent", field, "nested", 0) == private
+    assert resolve("structuredContent", "statusCode") == {
+        "integrity": "trusted",
+        "confidentiality": ["public"],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"statusCode": 204, "requestId": "request-1"},
+        {"statusCode": 200, "data": None},
+        {"statusCode": 200, "data": []},
+        {},
+    ],
+)
+def test_response_empty_payload_and_metadata_only_labels(payload) -> None:
+    labels = _dump_labels(WorkIQLabeling.labelfetch_blob({}, payload))
+    effective = _build_effective_labels({"$['structuredContent']": payload}, labels)
+    actual = _resolve_effective_label(
+        ["structuredContent"],
+        labels,
+        effective,
+        "test response",
+    )
+    assert actual == (
+        {"integrity": "trusted", "confidentiality": ["public"]}
+        if payload and "data" not in payload
+        else {"integrity": "untrusted", "confidentiality": []}
+    )

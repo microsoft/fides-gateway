@@ -10,6 +10,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.client.transports.base import ClientTransportT
 
 from mcp.types import CallToolRequestParams
+from jsonpath_rfc9535.serialize import canonical_string
 
 from lattice import IFCLabels, SecurityLattice
 from mcp_result import extract_structured_content
@@ -176,9 +177,13 @@ def _response_meta(tool_output: dict[str, Any]) -> LabeledMeta:
     """Keep returned entity data fail-closed while trusting the MCP envelope."""
     labels: dict[str, IFCLabels] = {"$": _fail_closed_labels()}
     trusted = _default_labels()
-    for field in ("statusCode", "error", "requestId"):
-        if field in tool_output:
-            labels[f"$['structuredContent']['{field}']"] = trusted
+    for field in tool_output:
+        path = f"$['structuredContent'][{canonical_string(field)}]"
+        labels[path] = (
+            trusted
+            if field in {"statusCode", "error", "requestId"}
+            else _fail_closed_labels()
+        )
     return LabeledMeta(**{IFC_LABELS_META_PREFIX: labels})
 
 

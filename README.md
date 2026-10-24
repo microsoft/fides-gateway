@@ -311,6 +311,13 @@ Unlike a policy rule, each labeling rule names a registered labeler function rat
 
 If a resource path matches no labeling rule, the gateway labels that result with an **empty reader set** rather than treating it as public. A later policy therefore cannot infer that any recipient is authorized and must request approval before forwarding the data. If the `labellers` block is omitted, this empty-reader label applies to every generic `fetch` result, so Work IQ configurations should list every supported resource path explicitly.
 
+For `fetch_blob`, `call_function`, and the entity/action write tools, response
+fields other than `statusCode`, `error`, and `requestId` receive explicit
+Untrusted labels with an empty reader set. This protects payloads even when
+Trusted/Public envelope labels determine an ancestor's effective label; the
+`$` fallback alone does not protect those fields. Metadata-only responses
+retain their Trusted/Public labels.
+
 The default `_build_proxy` dispatch raises `ValueError` for unknown middleware types. Custom middleware can be attached programmatically via `gateway.add_middleware(server_id, middleware)`.
 
 ### `eval_policy`
