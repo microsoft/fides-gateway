@@ -103,12 +103,17 @@ members_url := sprintf("/teams/%s/channels/%s/members?%s", [segments[1], segment
 
 members_response := upstream.fetch({"entityUrls": [members_url]}) if {
 	members_url
+	not context_trusted
+	not content_public
 }
 
 members_result := members_response.results[0]
 
 membership_available if {
 	members_result.statusCode == 200
+	is_array(members_result.data.value)
+	count(members) > 0
+	count(members) == count(members_result.data.value)
 }
 
 # A paginated membership list is an incomplete audience: fail closed rather than
@@ -120,6 +125,7 @@ membership_complete if {
 }
 
 members := [member |
+	is_array(members_result.data.value)
 	some member in members_result.data.value
 	is_object(member)
 ]

@@ -133,6 +133,59 @@ def test_unavailable_roster_fails_closed() -> None:
     assert decision["decision"] == "ask"
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"value": None},
+        {"value": {}},
+        {"value": []},
+        {"value": ["invalid"]},
+        {"value": [MEMBERS[0], "invalid"]},
+    ],
+)
+def test_unverifiable_roster_requires_approval(data) -> None:
+    decision = _run_policy_sync(
+        {
+            "name": "create_entity",
+            "arguments": {
+                "parentUrl": "/chats/chat-1/messages",
+                "jsonBody": {"body": {"content": "secret"}},
+            },
+        },
+        CREATE_ENTITY_POLICY,
+        _extensions(["user-alice", "user-bob"], data),
+    )["decision"]
+
+    assert decision["decision"] == "ask"
+
+
+@pytest.mark.parametrize(
+    "readers,integrity", [([], "trusted"), (["public"], "untrusted")]
+)
+def test_unverifiable_roster_preserves_trusted_or_public_allow(
+    readers, integrity
+) -> None:
+    def unexpected_fetch(_arguments):
+        pytest.fail("Trusted or Public calls must not depend on a membership lookup")
+
+    extensions = _extensions(readers, {}, integrity=integrity)
+    extensions["upstream.fetch"] = (1, unexpected_fetch)
+    decision = _run_policy_sync(
+        {
+            "name": "create_entity",
+            "arguments": {
+                "parentUrl": "/chats/chat-1/messages",
+                "jsonBody": {"body": {"content": "secret"}},
+            },
+        },
+        CREATE_ENTITY_POLICY,
+        extensions,
+    )["decision"]
+
+    assert decision["decision"] == "allow"
+
+
 def test_unvetted_creation_path_is_denied() -> None:
     decision = _create_decision(["public"], parent_url="/me/drive/root/children")
 
