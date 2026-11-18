@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 from typing import Any, Awaitable, Callable, Mapping
+from urllib.parse import quote
 
 from fastmcp import Client
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -327,13 +328,110 @@ async def _label_teams_messages(
     return _message_labels(data, audience)
 
 
+MAIL_AUDIENCE_SELECT = (
+    "$select=from,sender,toRecipients,ccRecipients,bccRecipients,replyTo"
+)
+
+
+def _mailbox_prefix(segments: list[str]) -> str | None:
+    keywords = [segment.lower() for segment in segments]
+    if keywords[:1] == ["me"]:
+        return "/me"
+    if len(segments) > 1 and keywords[0] == "users":
+        return f"/users/{segments[1]}"
+    return None
+
+
+def _addressed_message_id(segments: list[str]) -> str | None:
+    """Return the message id named in *segments*, if the path addresses
+    one message or a sub-resource of it (e.g. its attachments)."""
+    keywords = [segment.lower() for segment in segments]
+    if "messages" not in keywords:
+        return None
+    index = keywords.index("messages")
+    return segments[index + 1] if index + 1 < len(segments) else None
+
+
+def _owner_readers(profile: Any) -> set[str]:
+    if not isinstance(profile, dict):
+        return set()
+    return {
+        value.strip().lower()
+        for field in ("id", "mail", "userPrincipalName")
+        if isinstance(value := profile.get(field), str) and value.strip()
+    }
+
+
 async def _label_outlook_mail(
     url: str, data: Any, call_upstream: CallUpstream
 ) -> PathLabels:
-    del url, call_upstream
+    """Label mail with the mailbox owner plus the sender and recipients
+    stored on each message.
+
+    The addresses are read back from the upstream for every message
+    rather than taken from *data*, so the label does not depend on which
+    fields the caller asked for with ``$select``.
+    """
+    segments = _path_segments(url)
+    prefix = _mailbox_prefix(segments)
+    if prefix is None:
+        logger.warning("Mailbox ownership is not supported for %s", url)
+        return {"$": _fail_closed_labels()}
+
+    addressed_id = _addressed_message_id(segments)
+    if addressed_id is not None:
+        message_ids = [addressed_id]
+    else:
+        message_ids = []
+        for item in _collection_items(data):
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id and item_id not in message_ids:
+                message_ids.append(item_id)
+
+    lookup_urls = [f"{prefix}?$select=id,mail,userPrincipalName"] + [
+        f"{prefix}/messages/{quote(message_id, safe='')}?{MAIL_AUDIENCE_SELECT}"
+        for message_id in message_ids
+    ]
+    response = await call_upstream("fetch", {"entityUrls": lookup_urls})
+    results = response.get("results") if isinstance(response, dict) else None
+    if not isinstance(results, list):
+        results = []
+
+    def lookup_data(index: int) -> dict[str, Any] | None:
+        result = results[index] if index < len(results) else None
+        if not isinstance(result, dict) or result.get("statusCode") != 200:
+            return None
+        payload = result.get("data")
+        return payload if isinstance(payload, dict) else None
+
+    owner_readers = _owner_readers(lookup_data(0))
+    if not owner_readers:
+        logger.warning("Cannot verify mailbox owner for %s; using private labels", url)
+        return {"$": _fail_closed_labels()}
+
+    message_readers: dict[str, list[str]] = {}
+    for index, message_id in enumerate(message_ids, start=1):
+        message = lookup_data(index)
+        if message is None:
+            logger.warning(
+                "Cannot read recipients of message %s; using mailbox owner only",
+                message_id,
+            )
+            message_readers[message_id] = sorted(owner_readers)
+        else:
+            message_readers[message_id] = sorted(
+                owner_readers | set(_mail_audience(message))
+            )
+
+    def audience(item: dict[str, Any]) -> list[str]:
+        message_id = addressed_id if addressed_id is not None else item.get("id")
+        if isinstance(message_id, str) and message_id in message_readers:
+            return message_readers[message_id]
+        return sorted(owner_readers)
+
     return _entity_labels(
         data,
-        _mail_audience,
+        audience,
         (
             "id",
             "createdDateTime",

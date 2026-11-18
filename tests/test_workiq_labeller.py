@@ -188,36 +188,65 @@ def _fetch_rules(path: str, labeller: str) -> Any:
     )["fetch"]
 
 
+MAIL_AUDIENCE = "$select=from,sender,toRecipients,ccRecipients,bccRecipients,replyTo"
+OWNER_PROFILE = {"id": "owner-id", "mail": "Owner@example.com"}
+STORED_MESSAGE = {
+    "from": {"emailAddress": {"address": "alice@example.com"}},
+    "toRecipients": [
+        {"emailAddress": {"address": "owner@example.com"}},
+        {"emailAddress": {"address": "bob@example.com"}},
+    ],
+}
+
+
+def _mail_upstream(calls, owner=OWNER_PROFILE, message=STORED_MESSAGE):
+    async def lookup(name, arguments):
+        assert name == "fetch"
+        calls.append(arguments["entityUrls"])
+        results = []
+        for url in arguments["entityUrls"]:
+            if "/messages/" in url:
+                results.append(
+                    {"statusCode": 404, "data": None}
+                    if message is None
+                    else {"statusCode": 200, "data": message}
+                )
+            else:
+                results.append(
+                    {"statusCode": 404, "data": {}}
+                    if owner is None
+                    else {"statusCode": 200, "data": owner}
+                )
+        return {"results": results}
+
+    return lookup
+
+
 @pytest.mark.anyio
-async def test_mail_fields_use_sender_and_recipients_as_readers() -> None:
-    output = {
-        "results": [
-            {
-                "statusCode": 200,
-                "data": {
-                    "value": [
-                        {
-                            "id": "message-1",
-                            "subject": "Untrusted subject",
-                            "from": {"emailAddress": {"address": "alice@example.com"}},
-                            "toRecipients": [
-                                {"emailAddress": {"address": "bob@example.com"}}
-                            ],
-                        }
-                    ]
-                },
-            }
-        ]
-    }
+@pytest.mark.parametrize(
+    "returned",
+    [
+        {"id": "message-1", "subject": "Untrusted subject"},
+        {"id": "message-1", "from": {"emailAddress": {"address": "x@example.com"}}},
+    ],
+)
+async def test_mail_readers_come_from_stored_message_not_selected_fields(returned):
+    calls: list[list[str]] = []
     meta = await WorkIQLabeling.labelfetch(
-        {"entityUrls": ["/me/messages"]},
-        output,
-        _unused_upstream,
+        {"entityUrls": ["/me/messages?$select=subject"]},
+        {"results": [{"statusCode": 200, "data": {"value": [returned]}}]},
+        _mail_upstream(calls),
         _fetch_rules("/me/messages/**", "outlookMail"),
     )
     labels = _dump_labels(meta)
-    readers = ["alice@example.com", "bob@example.com"]
+    readers = ["alice@example.com", "bob@example.com", "owner-id", "owner@example.com"]
 
+    assert calls == [
+        [
+            "/me?$select=id,mail,userPrincipalName",
+            f"/me/messages/message-1?{MAIL_AUDIENCE}",
+        ]
+    ]
     assert labels["$['structuredContent']['results'][0]['data']['value'][0]"] == {
         "integrity": "untrusted",
         "confidentiality": readers,
@@ -230,6 +259,62 @@ async def test_mail_fields_use_sender_and_recipients_as_readers() -> None:
         "integrity": "trusted",
         "confidentiality": ["public"],
     }
+
+
+@pytest.mark.anyio
+async def test_mail_sub_resource_uses_addressed_message_and_user_mailbox():
+    calls: list[list[str]] = []
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/users/u1/messages/m%2F1/attachments"]},
+        {"results": [{"statusCode": 200, "data": {"value": [{"id": "att-1"}]}}]},
+        _mail_upstream(calls),
+        _fetch_rules("/users/*/messages/**", "outlookMail"),
+    )
+
+    assert calls == [
+        [
+            "/users/u1?$select=id,mail,userPrincipalName",
+            f"/users/u1/messages/m%252F1?{MAIL_AUDIENCE}",
+        ]
+    ]
+    assert _dump_labels(meta)["$"]["confidentiality"] == [
+        "alice@example.com",
+        "bob@example.com",
+        "owner-id",
+        "owner@example.com",
+    ]
+
+
+@pytest.mark.anyio
+async def test_unreadable_message_keeps_mailbox_owner_as_reader(caplog):
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/me/messages/message-1"]},
+        {"results": [{"statusCode": 200, "data": {"id": "message-1"}}]},
+        _mail_upstream([], message=None),
+        _fetch_rules("/me/messages/**", "outlookMail"),
+    )
+
+    assert _dump_labels(meta)["$"] == {
+        "integrity": "untrusted",
+        "confidentiality": ["owner-id", "owner@example.com"],
+    }
+    assert "Cannot read recipients of message message-1" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_unknown_mailbox_owner_fails_closed(caplog):
+    meta = await WorkIQLabeling.labelfetch(
+        {"entityUrls": ["/me/messages"]},
+        {"results": [{"statusCode": 200, "data": {"value": [{"id": "message-1"}]}}]},
+        _mail_upstream([], owner=None),
+        _fetch_rules("/me/messages/**", "outlookMail"),
+    )
+
+    assert _dump_labels(meta)["$"] == {
+        "integrity": "untrusted",
+        "confidentiality": [],
+    }
+    assert "Cannot verify mailbox owner" in caplog.text
 
 
 @pytest.mark.anyio
