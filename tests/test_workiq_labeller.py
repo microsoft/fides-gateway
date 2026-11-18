@@ -298,7 +298,7 @@ async def test_unreadable_message_keeps_mailbox_owner_as_reader(caplog):
         "integrity": "untrusted",
         "confidentiality": ["owner-id", "owner@example.com"],
     }
-    assert "Cannot read recipients of message message-1" in caplog.text
+    assert "Cannot read audience of message message-1" in caplog.text
 
 
 @pytest.mark.anyio
@@ -331,9 +331,6 @@ async def test_calendar_fields_use_owner_organizer_and_attendees_as_readers() ->
                             "organizer": {
                                 "emailAddress": {"address": "organizer@example.com"}
                             },
-                            "attendees": [
-                                {"emailAddress": {"address": "attendee@example.com"}}
-                            ],
                             "start": {
                                 "dateTime": "2026-09-10T09:00:00",
                                 "timeZone": "UTC",
@@ -347,18 +344,34 @@ async def test_calendar_fields_use_owner_organizer_and_attendees_as_readers() ->
 
     async def owner_lookup(name, arguments):
         assert name == "fetch"
-        assert arguments == {"entityUrls": ["/me?$select=id,mail,userPrincipalName"]}
+        assert arguments == {
+            "entityUrls": [
+                "/me?$select=id,mail,userPrincipalName",
+                "/me/events/event-1?$select=organizer,attendees",
+            ]
+        }
         return {
             "results": [
                 {
                     "statusCode": 200,
                     "data": {"id": "owner-id", "mail": "Owner@example.com"},
-                }
+                },
+                {
+                    "statusCode": 200,
+                    "data": {
+                        "organizer": {
+                            "emailAddress": {"address": "organizer@example.com"}
+                        },
+                        "attendees": [
+                            {"emailAddress": {"address": "attendee@example.com"}}
+                        ],
+                    },
+                },
             ]
         }
 
     meta = await WorkIQLabeling.labelfetch(
-        {"entityUrls": ["/me/events"]},
+        {"entityUrls": ["/me/events?$select=subject,organizer,start"]},
         output,
         owner_lookup,
         _fetch_rules("/me/events/**", "calendarEvents"),
@@ -405,13 +418,19 @@ async def test_unknown_calendar_owner_fails_closed(status, data, caplog):
 @pytest.mark.anyio
 async def test_named_calendar_uses_calendar_owner_not_current_user():
     async def owner_lookup(name, arguments):
-        assert arguments == {"entityUrls": ["/me/calendars/shared?$select=owner"]}
+        assert arguments == {
+            "entityUrls": [
+                "/me/calendars/shared?$select=owner",
+                "/me/calendars/shared/events/event-1?$select=organizer,attendees",
+            ]
+        }
         return {
             "results": [
                 {
                     "statusCode": 200,
                     "data": {"owner": {"address": "owner@example.com"}},
-                }
+                },
+                {"statusCode": 404, "data": None},
             ]
         }
 
@@ -454,10 +473,15 @@ async def test_member_fields_are_trusted_for_the_roster_audience() -> None:
             }
         ]
     }
+
+    async def roster_lookup(name, arguments):
+        assert arguments["entityUrls"][0].startswith("/chats/chat-1/members?")
+        return output
+
     meta = await WorkIQLabeling.labelfetch(
-        {"entityUrls": ["/chats/chat-1/members"]},
-        output,
-        _unused_upstream,
+        {"entityUrls": ["/chats/chat-1/members?$select=displayName"]},
+        {"results": [{"statusCode": 200, "data": {"value": [{"displayName": "A"}]}}]},
+        roster_lookup,
         _fetch_rules("/chats/*/members", "teamsMembers"),
     )
     labels = _dump_labels(meta)
@@ -503,7 +527,6 @@ def test_write_response_envelope_is_trusted_but_data_is_not() -> None:
 @pytest.mark.parametrize(
     "tool",
     [
-        "fetch_blob",
         "call_function",
         "create_entity",
         "update_entity",
@@ -538,8 +561,11 @@ def test_response_payload_effective_labels_remain_private(tool, field) -> None:
         {},
     ],
 )
-def test_response_empty_payload_and_metadata_only_labels(payload) -> None:
-    labels = _dump_labels(WorkIQLabeling.labelfetch_blob({}, payload))
+@pytest.mark.anyio
+async def test_response_empty_payload_and_metadata_only_labels(payload) -> None:
+    labels = _dump_labels(
+        await WorkIQLabeling.labelfetch_blob({}, payload, _unused_upstream)
+    )
     effective = _build_effective_labels({"$['structuredContent']": payload}, labels)
     actual = _resolve_effective_label(
         ["structuredContent"],
@@ -552,3 +578,104 @@ def test_response_empty_payload_and_metadata_only_labels(payload) -> None:
         if payload and "data" not in payload
         else {"integrity": "untrusted", "confidentiality": []}
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("field", ["data", "unexpected'payload"])
+async def test_unrouted_blob_payload_remains_private(field) -> None:
+    payload = {"statusCode": 200, field: {"nested": ["private content"]}}
+    labels = _dump_labels(
+        await WorkIQLabeling.labelfetch_blob(
+            {"path": "/me/drive/items/x/content"}, payload, _unused_upstream
+        )
+    )
+    effective = _build_effective_labels({"$['structuredContent']": payload}, labels)
+
+    def resolve(*path):
+        return _resolve_effective_label(list(path), labels, effective, "test response")
+
+    private = {"integrity": "untrusted", "confidentiality": []}
+    assert resolve("structuredContent", field, "nested", 0) == private
+    assert resolve("structuredContent", "statusCode") == {
+        "integrity": "trusted",
+        "confidentiality": ["public"],
+    }
+
+
+BLOB_RULES = resolve_labellers(
+    {
+        "fetch_blob": {
+            "pathArg": "path",
+            "rules": [
+                {"path": "/me/messages/*/attachments/**", "labeller": "outlookMail"},
+                {"path": "/**", "labeller": "currentUser"},
+            ],
+        }
+    }
+)["fetch_blob"]
+
+
+@pytest.mark.anyio
+async def test_mail_attachment_blob_takes_parent_message_readers() -> None:
+    calls: list[list[str]] = []
+    payload = {"statusCode": 200, "data": {"base64Content": "UERG"}}
+    labels = _dump_labels(
+        await WorkIQLabeling.labelfetch_blob(
+            {"path": "/me/messages/message-1/attachments/att-1/$value"},
+            payload,
+            _mail_upstream(calls),
+            BLOB_RULES,
+        )
+    )
+
+    assert calls == [
+        [
+            "/me?$select=id,mail,userPrincipalName",
+            f"/me/messages/message-1?{MAIL_AUDIENCE}",
+        ]
+    ]
+    assert labels["$['structuredContent']['data']"] == {
+        "integrity": "untrusted",
+        "confidentiality": [
+            "alice@example.com",
+            "bob@example.com",
+            "owner-id",
+            "owner@example.com",
+        ],
+    }
+    assert labels["$['structuredContent']['statusCode']"] == {
+        "integrity": "trusted",
+        "confidentiality": ["public"],
+    }
+
+
+@pytest.mark.anyio
+async def test_other_blob_and_fetch_paths_are_readable_by_signed_in_user() -> None:
+    calls: list[list[str]] = []
+    blob = _dump_labels(
+        await WorkIQLabeling.labelfetch_blob(
+            {"path": "/drives/d1/items/i1/content"},
+            {"statusCode": 200, "data": {"base64Content": "eA=="}},
+            _mail_upstream(calls),
+            BLOB_RULES,
+        )
+    )
+    fetched = _dump_labels(
+        await WorkIQLabeling.labelfetch(
+            {"entityUrls": ["/users?$filter=displayName eq 'Alice'"]},
+            {"results": [{"statusCode": 200, "data": {"value": [{"id": "a"}]}}]},
+            _mail_upstream(calls),
+            _fetch_rules("/**", "currentUser"),
+        )
+    )
+
+    readers = {
+        "integrity": "untrusted",
+        "confidentiality": ["owner-id", "owner@example.com"],
+    }
+    assert blob["$['structuredContent']['data']"] == readers
+    assert fetched["$"] == readers
+    assert calls == [
+        ["/me?$select=id,mail,userPrincipalName"],
+        ["/me?$select=id,mail,userPrincipalName"],
+    ]

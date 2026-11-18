@@ -129,7 +129,7 @@ async def test_fetch_of_a_member_roster_is_labelled_with_its_members() -> None:
         "user-alice",
         "user-bob",
     ]
-    assert calls == []
+    assert calls[0][1]["entityUrls"][0].startswith("/chats/19:abc@thread.v2/members?")
 
 
 @pytest.mark.anyio

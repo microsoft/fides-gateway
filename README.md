@@ -300,7 +300,15 @@ For a generic `fetch` tool, the tool name does not identify the resource that wa
       "pathArg": "entityUrls",
       "rules": [
         { "path": "/chats/*/members",     "labeller": "teamsMembers" },
-        { "path": "/chats/*/messages/**", "labeller": "teamsMessages" }
+        { "path": "/chats/*/messages/**", "labeller": "teamsMessages" },
+        { "path": "/**",                  "labeller": "currentUser" }
+      ]
+    },
+    "fetch_blob": {
+      "pathArg": "path",
+      "rules": [
+        { "path": "/me/messages/*/attachments/**", "labeller": "outlookMail" },
+        { "path": "/**",                           "labeller": "currentUser" }
       ]
     }
   }
@@ -311,9 +319,13 @@ Unlike a policy rule, each labeling rule names a registered labeler function rat
 
 If a resource path matches no labeling rule, the gateway labels that result with an **empty reader set** rather than treating it as public. A later policy therefore cannot infer that any recipient is authorized and must request approval before forwarding the data. If the `labellers` block is omitted, this empty-reader label applies to every generic `fetch` result, so Work IQ configurations should list every supported resource path explicitly.
 
-For `fetch_blob`, `call_function`, and the entity/action write tools, response
-fields other than `statusCode`, `error`, and `requestId` receive explicit
-Untrusted labels with an empty reader set. This protects payloads even when
+For `fetch_blob`, response fields other than `statusCode`, `error`, and
+`requestId` receive explicit Untrusted labels whose readers come from the
+`fetch_blob` labeling rule: a mail attachment routed to `outlookMail` takes its
+parent message's readers, a path routed to `currentUser` is readable by the
+signed-in user, and an unrouted path has an empty reader set. For
+`call_function` and the entity/action write tools, those fields receive
+explicit Untrusted labels with an empty reader set. This protects payloads even when
 Trusted/Public envelope labels determine an ancestor's effective label; the
 `$` fallback alone does not protect those fields. Metadata-only responses
 retain their Trusted/Public labels.
@@ -488,11 +500,19 @@ The Work IQ configuration uses these policies:
 
 The Teams message policy independently parses and validates the resource path after routing selects it.
 
-The `labellers` block selects a labeler for each `entityUrls` resource path. [`workiq_labeller.py`](workiq_labeller.py) labels chat and channel messages with the target conversation's members, labels membership-list responses with the listed members, and joins the labels when one `fetch` call contains multiple paths. For other known Work IQ tools, the gateway assigns one default IFC label to the complete result rather than separate labels to individual fields:
+The `labellers` block selects a labeler for each `entityUrls` resource path. [`workiq_labeller.py`](workiq_labeller.py) labels chat and channel messages with the target conversation's members, labels membership-list responses with the listed members, labels mail with the mailbox owner plus each message's sender and recipients, labels paths routed to `currentUser` with the signed-in user, and joins the labels when one `fetch` call contains multiple paths. For other known Work IQ tools, the gateway assigns one default IFC label to the complete result rather than separate labels to individual fields:
 
-- Results from `ask`, `fetch_blob`, and `delete_entity` are labeled untrusted/private.
+- Results from `ask` and `delete_entity` are labeled untrusted/private.
 - Results from `search_paths` and `get_schema` are labeled trusted/public because they contain server-owned API metadata.
 - Results from `list_agents` are labeled trusted/private because their contents depend on user configuration.
+
+Mail, Calendar, and membership-list labels do not depend on the fields the
+caller selected: the labeler reads each message's `from`, `sender`,
+`toRecipients`, `ccRecipients`, `bccRecipients`, and `replyTo`, each event's
+`organizer` and `attendees`, and the roster's members back from the upstream.
+Mail labels also include the mailbox owner from `/me` or `/users/{id}`; if the
+owner cannot be verified, the result has no known readers. If a message or
+event cannot be read back, its readers are the owner only.
 
 Calendar fetch labels include the owner, organizer, and attendees. Default
 Calendar ownership comes from `/me`; named Calendar ownership comes from the

@@ -174,16 +174,18 @@ def _private_labels(integrity: str) -> IFCLabels:
     return IFCLabels(integrity=integrity, confidentiality=[])
 
 
-def _response_meta(tool_output: dict[str, Any]) -> LabeledMeta:
-    """Keep returned entity data fail-closed while trusting the MCP envelope."""
-    labels: dict[str, IFCLabels] = {"$": _fail_closed_labels()}
+def _response_meta(
+    tool_output: dict[str, Any], content: IFCLabels | None = None
+) -> LabeledMeta:
+    """Label returned entity data with *content* (fail-closed by default)
+    while trusting the MCP envelope."""
+    content = content or _fail_closed_labels()
+    labels: dict[str, IFCLabels] = {"$": content}
     trusted = _default_labels()
     for field in tool_output:
         path = f"$['structuredContent'][{canonical_string(field)}]"
         labels[path] = (
-            trusted
-            if field in {"statusCode", "error", "requestId"}
-            else _fail_closed_labels()
+            trusted if field in {"statusCode", "error", "requestId"} else content
         )
     return LabeledMeta(**{IFC_LABELS_META_PREFIX: labels})
 
@@ -331,6 +333,28 @@ async def _label_teams_messages(
 MAIL_AUDIENCE_SELECT = (
     "$select=from,sender,toRecipients,ccRecipients,bccRecipients,replyTo"
 )
+EVENT_AUDIENCE_SELECT = "$select=organizer,attendees"
+IDENTITY_SELECT = "$select=id,mail,userPrincipalName"
+
+MAIL_TRUSTED_FIELDS = (
+    "id",
+    "createdDateTime",
+    "lastModifiedDateTime",
+    "receivedDateTime",
+    "sentDateTime",
+    "conversationId",
+    "internetMessageId",
+    "parentFolderId",
+    "from",
+    "sender",
+    "toRecipients",
+    "ccRecipients",
+    "bccRecipients",
+    "replyTo",
+    "isDraft",
+    "isRead",
+    "hasAttachments",
+)
 
 
 def _mailbox_prefix(segments: list[str]) -> str | None:
@@ -342,17 +366,18 @@ def _mailbox_prefix(segments: list[str]) -> str | None:
     return None
 
 
-def _addressed_message_id(segments: list[str]) -> str | None:
-    """Return the message id named in *segments*, if the path addresses
-    one message or a sub-resource of it (e.g. its attachments)."""
+def _addressed_id(segments: list[str], collection: str) -> str | None:
+    """Return the entity id that follows *collection* in *segments*, if the
+    path addresses one entity or a sub-resource of it (e.g. a message's
+    attachments)."""
     keywords = [segment.lower() for segment in segments]
-    if "messages" not in keywords:
+    if collection not in keywords:
         return None
-    index = keywords.index("messages")
+    index = keywords.index(collection)
     return segments[index + 1] if index + 1 < len(segments) else None
 
 
-def _owner_readers(profile: Any) -> set[str]:
+def _identity_readers(profile: Any) -> set[str]:
     if not isinstance(profile, dict):
         return set()
     return {
@@ -362,101 +387,119 @@ def _owner_readers(profile: Any) -> set[str]:
     }
 
 
-async def _label_outlook_mail(
-    url: str, data: Any, call_upstream: CallUpstream
-) -> PathLabels:
-    """Label mail with the mailbox owner plus the sender and recipients
-    stored on each message.
+def _item_ids(data: Any) -> list[str]:
+    ids: list[str] = []
+    for item in _collection_items(data):
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id and item_id not in ids:
+            ids.append(item_id)
+    return ids
 
-    The addresses are read back from the upstream for every message
-    rather than taken from *data*, so the label does not depend on which
-    fields the caller asked for with ``$select``.
+
+async def _fetch_data(
+    call_upstream: CallUpstream, urls: list[str]
+) -> list[dict[str, Any] | None]:
+    """Fetch *urls* in one upstream call; return each successful entity,
+    or ``None`` where the upstream did not return one."""
+    response = await call_upstream("fetch", {"entityUrls": urls})
+    results = response.get("results") if isinstance(response, dict) else None
+    if not isinstance(results, list):
+        results = []
+    entities: list[dict[str, Any] | None] = []
+    for index in range(len(urls)):
+        result = results[index] if index < len(results) else None
+        payload = (
+            result.get("data")
+            if isinstance(result, dict) and result.get("statusCode") == 200
+            else None
+        )
+        entities.append(payload if isinstance(payload, dict) else None)
+    return entities
+
+
+def _owner_and_entity_audiences(
+    owner_readers: set[str],
+    entity_ids: list[str],
+    entities: list[dict[str, Any] | None],
+    audience_of: Callable[[dict[str, Any]], list[str]],
+    kind: str,
+) -> dict[str, list[str]]:
+    audiences: dict[str, list[str]] = {}
+    for entity_id, entity in zip(entity_ids, entities):
+        if entity is None:
+            logger.warning(
+                "Cannot read audience of %s %s; using owner only", kind, entity_id
+            )
+            audiences[entity_id] = sorted(owner_readers)
+        else:
+            audiences[entity_id] = sorted(owner_readers | set(audience_of(entity)))
+    return audiences
+
+
+def _audience_lookup(
+    owner_readers: set[str],
+    audiences: dict[str, list[str]],
+    addressed_id: str | None,
+) -> Callable[[dict[str, Any]], list[str]]:
+    def audience(item: dict[str, Any]) -> list[str]:
+        entity_id = addressed_id if addressed_id is not None else item.get("id")
+        if isinstance(entity_id, str) and entity_id in audiences:
+            return audiences[entity_id]
+        return sorted(owner_readers)
+
+    return audience
+
+
+async def _mail_audience_for(
+    url: str, data: Any, call_upstream: CallUpstream
+) -> Callable[[dict[str, Any]], list[str]] | None:
+    """Return a function giving each mail item's readers: the mailbox
+    owner plus the sender and recipients stored on the message.
+
+    The addresses are read back from the upstream rather than taken from
+    *data*, so the label does not depend on which fields the caller asked
+    for with ``$select``. Returns ``None`` when the mailbox owner cannot
+    be verified.
     """
     segments = _path_segments(url)
     prefix = _mailbox_prefix(segments)
     if prefix is None:
         logger.warning("Mailbox ownership is not supported for %s", url)
-        return {"$": _fail_closed_labels()}
-
-    addressed_id = _addressed_message_id(segments)
-    if addressed_id is not None:
-        message_ids = [addressed_id]
-    else:
-        message_ids = []
-        for item in _collection_items(data):
-            item_id = item.get("id")
-            if isinstance(item_id, str) and item_id and item_id not in message_ids:
-                message_ids.append(item_id)
-
-    lookup_urls = [f"{prefix}?$select=id,mail,userPrincipalName"] + [
-        f"{prefix}/messages/{quote(message_id, safe='')}?{MAIL_AUDIENCE_SELECT}"
-        for message_id in message_ids
-    ]
-    response = await call_upstream("fetch", {"entityUrls": lookup_urls})
-    results = response.get("results") if isinstance(response, dict) else None
-    if not isinstance(results, list):
-        results = []
-
-    def lookup_data(index: int) -> dict[str, Any] | None:
-        result = results[index] if index < len(results) else None
-        if not isinstance(result, dict) or result.get("statusCode") != 200:
-            return None
-        payload = result.get("data")
-        return payload if isinstance(payload, dict) else None
-
-    owner_readers = _owner_readers(lookup_data(0))
+        return None
+    addressed_id = _addressed_id(segments, "messages")
+    message_ids = [addressed_id] if addressed_id is not None else _item_ids(data)
+    entities = await _fetch_data(
+        call_upstream,
+        [f"{prefix}?{IDENTITY_SELECT}"]
+        + [
+            f"{prefix}/messages/{quote(message_id, safe='')}?{MAIL_AUDIENCE_SELECT}"
+            for message_id in message_ids
+        ],
+    )
+    owner_readers = _identity_readers(entities[0])
     if not owner_readers:
         logger.warning("Cannot verify mailbox owner for %s; using private labels", url)
-        return {"$": _fail_closed_labels()}
-
-    message_readers: dict[str, list[str]] = {}
-    for index, message_id in enumerate(message_ids, start=1):
-        message = lookup_data(index)
-        if message is None:
-            logger.warning(
-                "Cannot read recipients of message %s; using mailbox owner only",
-                message_id,
-            )
-            message_readers[message_id] = sorted(owner_readers)
-        else:
-            message_readers[message_id] = sorted(
-                owner_readers | set(_mail_audience(message))
-            )
-
-    def audience(item: dict[str, Any]) -> list[str]:
-        message_id = addressed_id if addressed_id is not None else item.get("id")
-        if isinstance(message_id, str) and message_id in message_readers:
-            return message_readers[message_id]
-        return sorted(owner_readers)
-
-    return _entity_labels(
-        data,
-        audience,
-        (
-            "id",
-            "createdDateTime",
-            "lastModifiedDateTime",
-            "receivedDateTime",
-            "sentDateTime",
-            "conversationId",
-            "internetMessageId",
-            "parentFolderId",
-            "from",
-            "sender",
-            "toRecipients",
-            "ccRecipients",
-            "bccRecipients",
-            "replyTo",
-            "isDraft",
-            "isRead",
-            "hasAttachments",
-        ),
+        return None
+    audiences = _owner_and_entity_audiences(
+        owner_readers, message_ids, entities[1:], _mail_audience, "message"
     )
+    return _audience_lookup(owner_readers, audiences, addressed_id)
+
+
+async def _label_outlook_mail(
+    url: str, data: Any, call_upstream: CallUpstream
+) -> PathLabels:
+    audience = await _mail_audience_for(url, data, call_upstream)
+    if audience is None:
+        return {"$": _fail_closed_labels()}
+    return _entity_labels(data, audience, MAIL_TRUSTED_FIELDS)
 
 
 async def _label_calendar_events(
     url: str, data: Any, call_upstream: CallUpstream
 ) -> PathLabels:
+    """Label events with the calendar owner plus the organizer and
+    attendees stored on each event, read back from the upstream."""
     segments = _path_segments(url)
     if len(segments) < 2 or segments[0].lower() != "me":
         logger.warning("Calendar ownership is not supported for %s", url)
@@ -465,35 +508,39 @@ async def _label_calendar_events(
     owner_url = (
         f"/me/calendars/{segments[2]}?$select=owner"
         if named_calendar
-        else "/me?$select=id,mail,userPrincipalName"
+        else f"/me?{IDENTITY_SELECT}"
     )
-    response = await call_upstream("fetch", {"entityUrls": [owner_url]})
-    results = response.get("results")
-    result = results[0] if isinstance(results, list) and results else {}
-    profile = result.get("data") if isinstance(result, dict) else None
+    event_prefix = f"/me/calendars/{segments[2]}" if named_calendar else "/me"
+    addressed_id = _addressed_id(segments, "events")
+    event_ids = [addressed_id] if addressed_id is not None else _item_ids(data)
+    entities = await _fetch_data(
+        call_upstream,
+        [owner_url]
+        + [
+            f"{event_prefix}/events/{quote(event_id, safe='')}?{EVENT_AUDIENCE_SELECT}"
+            for event_id in event_ids
+        ],
+    )
+    profile = entities[0]
     owner_readers: set[str] = set()
-    if (
-        isinstance(result, dict)
-        and result.get("statusCode") == 200
-        and isinstance(profile, dict)
-    ):
-        if named_calendar:
-            address = _email_address({"emailAddress": profile.get("owner")})
-            if address:
-                owner_readers.add(address)
-        else:
-            owner_readers = {
-                value.strip().lower()
-                for field in ("id", "mail", "userPrincipalName")
-                if isinstance(value := profile.get(field), str) and value.strip()
-            }
+    if named_calendar:
+        address = _email_address(
+            {"emailAddress": profile.get("owner") if profile else None}
+        )
+        if address:
+            owner_readers.add(address)
+    else:
+        owner_readers = _identity_readers(profile)
     if not owner_readers:
         logger.warning("Cannot verify Calendar owner for %s; using private labels", url)
         return {"$": _fail_closed_labels()}
 
+    audiences = _owner_and_entity_audiences(
+        owner_readers, event_ids, entities[1:], _calendar_audience, "event"
+    )
     return _entity_labels(
         data,
-        lambda event: sorted(owner_readers | set(_calendar_audience(event))),
+        _audience_lookup(owner_readers, audiences, addressed_id),
         (
             "id",
             "createdDateTime",
@@ -516,11 +563,13 @@ async def _label_calendar_events(
 async def _label_teams_members(
     url: str, data: Any, call_upstream: CallUpstream
 ) -> PathLabels:
-    """Label a member roster with its own members."""
-    del url, call_upstream
-    principals = _principals_from_members(
-        data.get("value") if isinstance(data, dict) else None
+    """Label a member roster with its own members, read back from the
+    upstream so the label does not depend on the caller's ``$select``."""
+    path = url.split("?")[0] if isinstance(url, str) else ""
+    (roster,) = await _fetch_data(
+        call_upstream, [f"{path}?{CONVERSATION_MEMBER_SELECT}"]
     )
+    principals = _principals_from_members(roster.get("value") if roster else None)
     label = IFCLabels(integrity="trusted", confidentiality=sorted(principals))
     labels = {"$": label}
     collection = isinstance(data, dict) and isinstance(data.get("value"), list)
@@ -531,6 +580,24 @@ async def _label_teams_members(
     return labels
 
 
+async def _current_user_readers(call_upstream: CallUpstream) -> list[str]:
+    (profile,) = await _fetch_data(call_upstream, [f"/me?{IDENTITY_SELECT}"])
+    return sorted(_identity_readers(profile))
+
+
+async def _label_current_user(
+    url: str, data: Any, call_upstream: CallUpstream
+) -> PathLabels:
+    """Label data with no more specific audience as readable by the
+    signed-in user who fetched it."""
+    del data
+    readers = await _current_user_readers(call_upstream)
+    if not readers:
+        logger.warning("Cannot verify signed-in user for %s; using private labels", url)
+        return {"$": _fail_closed_labels()}
+    return {"$": IFCLabels(integrity="untrusted", confidentiality=readers)}
+
+
 PathLabeller = Callable[[str, Any, CallUpstream], Awaitable[PathLabels]]
 
 FETCH_LABELLERS: dict[str, PathLabeller] = {
@@ -538,6 +605,7 @@ FETCH_LABELLERS: dict[str, PathLabeller] = {
     "outlookMail": _label_outlook_mail,
     "teamsMessages": _label_teams_messages,
     "teamsMembers": _label_teams_members,
+    "currentUser": _label_current_user,
 }
 
 
@@ -837,12 +905,37 @@ class WorkIQLabeling:
         return _fallback_meta(_private_labels("trusted"))
 
     @staticmethod
-    def labelfetch_blob(
-        tool_input: dict[str, Any], tool_output: dict[str, Any]
+    async def labelfetch_blob(
+        tool_input: dict[str, Any],
+        tool_output: dict[str, Any],
+        call_upstream: CallUpstream,
+        path_rules: PathRules | None = None,
     ) -> LabeledMeta:
-        """Keep binary content private while trusting response metadata."""
-        del tool_input
-        return _response_meta(tool_output)
+        """Label binary content by the resource it was read from.
+
+        A mail attachment takes the readers of its parent message
+        (``outlookMail``); other content routed to ``currentUser`` is
+        readable by the signed-in user. Unrouted paths stay private.
+        Response metadata is trusted.
+        """
+        path = tool_input.get("path")
+        name = (
+            match_path(path_rules, path)
+            if path_rules is not None and isinstance(path, str)
+            else None
+        )
+        readers: list[str] = []
+        if name == "outlookMail":
+            audience = await _mail_audience_for(path, None, call_upstream)
+            readers = audience({}) if audience is not None else []
+        elif name == "currentUser":
+            readers = await _current_user_readers(call_upstream)
+        content = (
+            IFCLabels(integrity="untrusted", confidentiality=readers)
+            if readers
+            else None
+        )
+        return _response_meta(tool_output, content)
 
     @staticmethod
     def labelcall_function(

@@ -88,6 +88,31 @@
                 {
                   "path": "/me/calendars/*/calendarView/**",
                   "labeller": "calendarEvents"
+                },
+                {
+                  "path": "/**",
+                  "labeller": "currentUser"
+                }
+              ]
+            },
+            "fetch_blob": {
+              "pathArg": "path",
+              "rules": [
+                {
+                  "path": "/me/messages/*/attachments/**",
+                  "labeller": "outlookMail"
+                },
+                {
+                  "path": "/me/mailFolders/*/messages/*/attachments/**",
+                  "labeller": "outlookMail"
+                },
+                {
+                  "path": "/users/*/messages/*/attachments/**",
+                  "labeller": "outlookMail"
+                },
+                {
+                  "path": "/**",
+                  "labeller": "currentUser"
                 }
               ]
             }
