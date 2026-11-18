@@ -1022,6 +1022,7 @@ class WorkIQLabellingMiddleware(Middleware):
     ) -> None:
         self._upstream_client_factory = upstream_client_factory
         self._labellers: dict[str, PathRules] = resolve_labellers(labellers)
+        self._signed_in_user: list[str] = []
 
     async def on_call_tool(
         self,
@@ -1075,6 +1076,7 @@ class WorkIQLabellingMiddleware(Middleware):
             # fail-closed IFC labels so an unknown result is never treated as
             # trusted or public merely because no precise labeler exists.
             labeled_meta = _fallback_meta(_fail_closed_labels())
+        labeled_meta = await self._with_signed_in_user(labeled_meta)
 
         meta[IFC_LABELS_META_PREFIX] = {
             path: labels.model_dump()
@@ -1082,6 +1084,54 @@ class WorkIQLabellingMiddleware(Middleware):
         }
         result.meta = meta
         return result
+
+    async def _with_signed_in_user(self, labeled_meta: LabeledMeta) -> LabeledMeta:
+        """Add the signed-in user to the readers of every non-public label.
+
+        Every Work IQ result is returned to the signed-in user under their
+        own credentials, so that user can always read it. If the user
+        cannot be verified, the labels are left unchanged.
+        """
+        if all(
+            "public" in label.confidentiality
+            for label in labeled_meta.ifc_labels.values()
+        ):
+            return labeled_meta
+        readers = await self._signed_in_user_readers()
+        if not readers:
+            return labeled_meta
+        labeled_meta.ifc_labels = {
+            path: (
+                label
+                if "public" in label.confidentiality
+                else label.model_copy(
+                    update={
+                        "confidentiality": sorted(
+                            set(label.confidentiality) | set(readers)
+                        )
+                    }
+                )
+            )
+            for path, label in labeled_meta.ifc_labels.items()
+        }
+        return labeled_meta
+
+    async def _signed_in_user_readers(self) -> list[str]:
+        if self._signed_in_user or self._upstream_client_factory is None:
+            return self._signed_in_user
+        try:
+            async with self._upstream_client_factory() as session:
+
+                async def call_upstream(
+                    name: str, arguments: dict[str, Any]
+                ) -> dict[str, Any]:
+                    result = await session.call_tool(name, arguments)
+                    return extract_structured_content(result)
+
+                self._signed_in_user = await _current_user_readers(call_upstream)
+        except Exception:
+            logger.warning("Cannot verify signed-in user; labels left unchanged")
+        return self._signed_in_user
 
     def _path_rules_for(
         self, labeler: Callable[..., Any], tool_name: str | None

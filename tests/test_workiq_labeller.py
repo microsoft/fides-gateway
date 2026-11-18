@@ -737,3 +737,63 @@ async def test_other_blob_and_fetch_paths_are_readable_by_signed_in_user() -> No
         ["/me?$select=id,mail,userPrincipalName"],
         ["/me?$select=id,mail,userPrincipalName"],
     ]
+
+
+class _SignedInUserSession:
+    def __init__(self, calls: list[Any], profile: dict[str, Any] | None) -> None:
+        self._calls = calls
+        self._profile = profile
+
+    async def __aenter__(self) -> "_SignedInUserSession":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        self._calls.append((name, arguments))
+        result = (
+            {"statusCode": 200, "data": self._profile}
+            if self._profile is not None
+            else {"statusCode": 404, "data": {}}
+        )
+        return ToolResult.model_construct(
+            content=[], meta={}, structured_content={"results": [result]}
+        )
+
+
+@pytest.mark.anyio
+async def test_signed_in_user_is_added_to_every_private_label() -> None:
+    calls: list[Any] = []
+    middleware = WorkIQLabellingMiddleware(
+        upstream_client_factory=lambda: _SignedInUserSession(
+            calls, {"mail": "User@example.com"}
+        )
+    )
+
+    async def call_next(_context: object) -> ToolResult:
+        return ToolResult.model_construct(content=[], meta={}, structured_content={})
+
+    for _ in range(2):
+        result = await middleware.on_call_tool(_ctx("NoSpecificLabeler"), call_next)
+        assert result.meta[IFC_LABELS_META_PREFIX] == {
+            "$": {"integrity": "untrusted", "confidentiality": ["user@example.com"]}
+        }
+    public = await middleware.on_call_tool(_ctx("get_schema"), call_next)
+    assert public.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == ["public"]
+    assert calls == [
+        ("fetch", {"entityUrls": ["/me?$select=id,mail,userPrincipalName"]})
+    ]
+
+
+@pytest.mark.anyio
+async def test_unknown_signed_in_user_leaves_labels_unchanged() -> None:
+    middleware = WorkIQLabellingMiddleware(
+        upstream_client_factory=lambda: _SignedInUserSession([], None)
+    )
+
+    async def call_next(_context: object) -> ToolResult:
+        return ToolResult.model_construct(content=[], meta={}, structured_content={})
+
+    result = await middleware.on_call_tool(_ctx("NoSpecificLabeler"), call_next)
+    assert result.meta[IFC_LABELS_META_PREFIX]["$"]["confidentiality"] == []

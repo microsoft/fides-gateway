@@ -524,6 +524,12 @@ This audience model does not discover additional sharing or delegation grants.
 
 Results from any other Work IQ tool default to untrusted/private until a more precise labeler is configured. These defaults are intentionally coarse-grained. Field-level labels for mixed-content responses remain follow-up work.
 
+Every Work IQ result is returned under the signed-in user's credentials, so
+the middleware adds the signed-in user (read once from `/me` and cached) to the
+readers of every label that is not public. A private label therefore means
+"readable by the signed-in user only". If the signed-in user cannot be
+verified, labels are left unchanged.
+
 `OutputSchemaMiddleware` publishes and validates fixed response schemas for `ask`, `search_paths`, `fetch_blob`, and `delete_entity`. Schemas for resource-path-dependent tools remain follow-up work.
 
 These policies do not require a particular FastMCP transport version. A proxy can
