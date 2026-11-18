@@ -458,14 +458,17 @@ async def _mail_audience_for(
 
     The addresses are read back from the upstream rather than taken from
     *data*, so the label does not depend on which fields the caller asked
-    for with ``$select``. Returns ``None`` when the mailbox owner cannot
-    be verified.
+    for with ``$select``. When the mailbox owner cannot be verified, the
+    signed-in user stands in for the owner. Returns ``None`` only when
+    neither can be verified.
     """
     segments = _path_segments(url)
     prefix = _mailbox_prefix(segments)
     if prefix is None:
-        logger.warning("Mailbox ownership is not supported for %s", url)
-        return None
+        logger.warning(
+            "Mailbox ownership is not supported for %s; using signed-in user", url
+        )
+        return await _current_user_audience(call_upstream)
     addressed_id = _addressed_id(segments, "messages")
     message_ids = [addressed_id] if addressed_id is not None else _item_ids(data)
     entities = await _fetch_data(
@@ -478,7 +481,10 @@ async def _mail_audience_for(
     )
     owner_readers = _identity_readers(entities[0])
     if not owner_readers:
-        logger.warning("Cannot verify mailbox owner for %s; using private labels", url)
+        logger.warning("Cannot verify mailbox owner for %s; using signed-in user", url)
+        owner_readers = set(await _current_user_readers(call_upstream))
+    if not owner_readers:
+        logger.warning("Cannot verify signed-in user for %s; using private labels", url)
         return None
     audiences = _owner_and_entity_audiences(
         owner_readers, message_ids, entities[1:], _mail_audience, "message"
@@ -502,8 +508,10 @@ async def _label_calendar_events(
     attendees stored on each event, read back from the upstream."""
     segments = _path_segments(url)
     if len(segments) < 2 or segments[0].lower() != "me":
-        logger.warning("Calendar ownership is not supported for %s", url)
-        return {"$": _fail_closed_labels()}
+        logger.warning(
+            "Calendar ownership is not supported for %s; using signed-in user", url
+        )
+        return await _label_current_user(url, data, call_upstream)
     named_calendar = len(segments) >= 3 and segments[1].lower() == "calendars"
     owner_url = (
         f"/me/calendars/{segments[2]}?$select=owner"
@@ -532,7 +540,10 @@ async def _label_calendar_events(
     else:
         owner_readers = _identity_readers(profile)
     if not owner_readers:
-        logger.warning("Cannot verify Calendar owner for %s; using private labels", url)
+        logger.warning("Cannot verify Calendar owner for %s; using signed-in user", url)
+        owner_readers = set(await _current_user_readers(call_upstream))
+    if not owner_readers:
+        logger.warning("Cannot verify signed-in user for %s; using private labels", url)
         return {"$": _fail_closed_labels()}
 
     audiences = _owner_and_entity_audiences(
@@ -583,6 +594,15 @@ async def _label_teams_members(
 async def _current_user_readers(call_upstream: CallUpstream) -> list[str]:
     (profile,) = await _fetch_data(call_upstream, [f"/me?{IDENTITY_SELECT}"])
     return sorted(_identity_readers(profile))
+
+
+async def _current_user_audience(
+    call_upstream: CallUpstream,
+) -> Callable[[dict[str, Any]], list[str]] | None:
+    readers = await _current_user_readers(call_upstream)
+    if not readers:
+        return None
+    return lambda item: readers
 
 
 async def _label_current_user(

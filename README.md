@@ -510,14 +510,16 @@ Mail, Calendar, and membership-list labels do not depend on the fields the
 caller selected: the labeler reads each message's `from`, `sender`,
 `toRecipients`, `ccRecipients`, `bccRecipients`, and `replyTo`, each event's
 `organizer` and `attendees`, and the roster's members back from the upstream.
-Mail labels also include the mailbox owner from `/me` or `/users/{id}`; if the
-owner cannot be verified, the result has no known readers. If a message or
-event cannot be read back, its readers are the owner only.
+Mail and Calendar labels also include the mailbox or calendar owner; if the
+owner cannot be verified, the signed-in user from `/me` is used instead, and the
+result has no known readers only when the signed-in user cannot be verified
+either. If a message or event cannot be read back, its readers are the owner
+only.
 
 Calendar fetch labels include the owner, organizer, and attendees. Default
 Calendar ownership comes from `/me`; named Calendar ownership comes from the
 Calendar's `owner` metadata, not from a submitted event organizer. If ownership
-cannot be verified, the result remains untrusted/private with no known readers.
+cannot be verified, the signed-in user is used as the owner.
 This audience model does not discover additional sharing or delegation grants.
 
 Results from any other Work IQ tool default to untrusted/private until a more precise labeler is configured. These defaults are intentionally coarse-grained. Field-level labels for mixed-content responses remain follow-up work.
